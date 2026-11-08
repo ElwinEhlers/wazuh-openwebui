@@ -4,7 +4,7 @@ author: Elwin Ehlers
 author_url: https://github.com/ElwinEhlers
 credits: Entwickelt mit Claude (Anthropic)
 description: Bewertet Wazuh-Schwachstellen-Einträge (wazuh-states-vulnerabilities) auf Debian/Ubuntu mit festen Regeln und wertet die Ausgaben der Prüfbefehle aus. Das Sprachmodell schreibt nur den Satz "Worum geht's" (optional).
-version: 1.7
+version: 1.8
 license: MIT
 """
 
@@ -17,6 +17,8 @@ license: MIT
 
 import json
 import re
+import socket
+import urllib.parse
 import urllib.request
 
 from pydantic import BaseModel, Field
@@ -562,13 +564,30 @@ def text_von(nachricht):
 class Pipe:
     class Valves(BaseModel):
         LLM_URL: str = Field(default="http://localhost:8080/v1",
-                             description="OpenAI-kompatible API (llama.cpp, Ollama, vLLM, OpenAI …), endet auf /v1")
+                             description="OpenAI-kompatible API (llama.cpp, Ollama, vLLM, OpenAI …), endet auf /v1. Mehrere Adressen möglich (eine pro Zeile), die erste erreichbare wird genutzt")
         LLM_KEY: str = Field(default="", description="API-Key, falls der Server einen verlangt")
         LLM_MODELL: str = Field(default="", description="Modellname, z. B. qwen3.5-9b oder llama3.1:8b")
         WORUM_SATZ: bool = Field(default=True, description="Satz 'Worum geht's' vom Sprachmodell schreiben lassen")
 
     def __init__(self):
         self.valves = self.Valves()
+        self._zuletzt = ""  # zuletzt erreichbare LLM-Adresse, wird zuerst probiert
+
+    def llm_adressen(self):
+        adressen = [a for a in re.split(r"[\s,;]+", self.valves.LLM_URL or "") if a.startswith("http")]
+        if self._zuletzt in adressen:
+            adressen.remove(self._zuletzt)
+            adressen.insert(0, self._zuletzt)
+        return adressen
+
+    @staticmethod
+    def erreichbar(url):
+        u = urllib.parse.urlparse(url)
+        try:
+            socket.create_connection((u.hostname, u.port or (443 if u.scheme == "https" else 80)), timeout=2).close()
+            return True
+        except OSError:
+            return False
 
     def worum(self, beschreibung):
         if not self.valves.WORUM_SATZ or not beschreibung:
@@ -584,17 +603,21 @@ class Pipe:
             "temperature": 0.3, "max_tokens": 120,
             "chat_template_kwargs": {"enable_thinking": False},
         }
-        try:
-            kopf = {"Content-Type": "application/json"}
-            if self.valves.LLM_KEY:
-                kopf["Authorization"] = f"Bearer {self.valves.LLM_KEY}"
-            req = urllib.request.Request(self.valves.LLM_URL.rstrip("/") + "/chat/completions",
-                                         json.dumps(body).encode(), kopf)
-            antwort = json.load(urllib.request.urlopen(req, timeout=60))
-            satz = antwort["choices"][0]["message"]["content"].strip()
-            return re.sub(r"\s+", " ", satz)
-        except Exception:  # Sprachmodell nicht erreichbar: Antwort kommt dann ohne "Worum geht's"
-            return ""
+        for adresse in self.llm_adressen():
+            if not self.erreichbar(adresse):
+                continue
+            try:
+                kopf = {"Content-Type": "application/json"}
+                if self.valves.LLM_KEY:
+                    kopf["Authorization"] = f"Bearer {self.valves.LLM_KEY}"
+                req = urllib.request.Request(adresse.rstrip("/") + "/chat/completions", json.dumps(body).encode(), kopf)
+                antwort = json.load(urllib.request.urlopen(req, timeout=60))
+                satz = antwort["choices"][0]["message"]["content"].strip()
+                self._zuletzt = adresse
+                return re.sub(r"\s+", " ", satz)
+            except Exception:  # diese Adresse antwortet nicht sinnvoll: nächste probieren
+                continue
+        return ""  # kein Sprachmodell erreichbar: Antwort kommt dann ohne "Worum geht's"
 
     def pipe(self, body: dict, __task__=None) -> str:
         nachrichten = body.get("messages", [])

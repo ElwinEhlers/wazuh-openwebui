@@ -44,7 +44,7 @@ immer gleiches Ergebnis, ~1 Sekunde, testbar. Das LLM schreibt nur noch den Satz
 
 | Einstellung | Bedeutung | Standard |
 |---|---|---|
-| `LLM_URL` | OpenAI-kompatible API (llama.cpp, Ollama, vLLM, OpenAI …), aus dem Open-WebUI-Container erreichbar | `http://localhost:8080/v1` |
+| `LLM_URL` | OpenAI-kompatible API (llama.cpp, Ollama, vLLM, OpenAI …), aus dem Open-WebUI-Container erreichbar. Mehrere Adressen möglich, eine pro Zeile – die erste erreichbare wird genutzt | `http://localhost:8080/v1` |
 | `LLM_KEY` | API-Key, falls nötig | leer |
 | `LLM_MODELL` | Modellname | leer |
 | `WORUM_SATZ` | Satz „Worum geht's“ vom LLM; aus = ganz ohne LLM | an |
