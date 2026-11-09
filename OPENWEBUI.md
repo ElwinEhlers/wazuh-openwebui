@@ -28,7 +28,7 @@ What it checks:
 - Kernel findings: extracts the driver ("drm/xe:" → xe), foreign architectures (s390, arm …) → 🟢, checks kernel config and `lsmod` (module present but not loaded → 🟢)
 - After pasting the output: Debian changelog, listening ports of known services, local-only and client-side bugs, Secure Boot (`mokutil`), libraries → programs using them, old CVEs → Debian tracker
 
-Settings (valves): `LLM_URL` (any OpenAI-compatible API: llama.cpp, Ollama, vLLM, OpenAI), `LLM_KEY`, `LLM_MODELL`, `WORUM_SATZ` (off = no LLM at all).
+Settings (valves): `LLM_URL` (any OpenAI-compatible API: llama.cpp, Ollama, vLLM, OpenAI), `LLM_KEY`, `LLM_MODELL`, `WORUM_SATZ` (off = no LLM at all), `ONLINE` (query NVD for the attack vector and the Debian security tracker for the fix status; needs internet access from the Open WebUI container — type `Verbindungstest` in the chat to check), `NVD_KEY` (optional).
 
 Tested setup: RTX 3060 Ti 8 GB, Ryzen 7 3700X, 32 GB RAM, Debian 13, llama.cpp `llama-server` with Qwen3.5-9B (Unsloth UD-Q4_K_XL, fully on GPU), Open WebUI 0.13.0, Wazuh 4.14.10 – about 1 second per answer. Any small model (3–4B, even CPU-only) is enough for the single sentence; the verdict itself needs no LLM. For comparison: as a pure system prompt the same 9B model with thinking took ~35 s per finding and was still not always right.
 

@@ -2,7 +2,7 @@
 
 Eine Funktion für [Open WebUI](https://github.com/open-webui/open-webui), die **Schwachstellen-Meldungen aus Wazuh** auf
 Debian/Ubuntu bewertet. JSON aus `wazuh-states-vulnerabilities-*` in den Chat einfügen → Ampel 🟢/🟡/🔴, Begründung und
-Prüfbefehle. Ausgabe der Befehle einfügen → Endergebnis: **betroffen? von außen angreifbar? was tun?**
+Prüfbefehle. Ausgabe der Befehle einfügen → Endergebnis: **betroffen? von außen angreifbar? lokal ausnutzbar? was tun?**
 
 ## Beispiel
 
@@ -18,7 +18,7 @@ Prüfbefehle. Ausgabe der Befehle einfügen → Endergebnis: **betroffen? von au
 Nach dem Einfügen der Ausgabe:
 
 > ## 🟡 Betroffen, aber derzeit nicht angreifbar
-> **Ergebnis:** Betroffen: **Ja** · Von außen angreifbar: **Nein** – Fix fehlt, Port 873 (rsync) lauscht nicht.
+> **Ergebnis:** Betroffen: **Ja** · Von außen angreifbar: **Nein** · Lokal ausnutzbar: **Unklar** – Fix fehlt, Port 873 (rsync) lauscht nicht.
 > **Was tun:** Update einspielen, sobald Debian es liefert.
 
 ## Warum Python und nicht das Sprachmodell?
@@ -48,6 +48,34 @@ immer gleiches Ergebnis, ~1 Sekunde, testbar. Das LLM schreibt nur noch den Satz
 | `LLM_KEY` | API-Key, falls nötig | leer |
 | `LLM_MODELL` | Modellname | leer |
 | `WORUM_SATZ` | Satz „Worum geht's“ vom LLM; aus = ganz ohne LLM | an |
+| `ONLINE` | NVD (Angriffsweg) und Debian-Tracker (Fix-Stand) abfragen; braucht Internet im Open-WebUI-Container | an |
+| `NVD_KEY` | Optionaler [NVD-API-Key](https://nvd.nist.gov/developers/request-an-api-key) für mehr Anfragen pro Minute | leer |
+
+## Internet: NVD und Debian-Tracker
+
+Mit Internet fragt die Funktion zu jeder CVE zwei öffentliche Quellen ab:
+
+- **NVD** (nvd.nist.gov): Angriffsweg – über das Netzwerk, nur lokal oder nur mit Zugriff am Gerät – und nötige Rechte
+- **Debian-Tracker** (security-tracker.debian.org): Stand für die Debian-Version des Rechners – behoben in Version X,
+  offen, ignoriert, unwichtig oder nicht betroffen
+
+Ist das eindeutig, steht das Endergebnis schon in der ersten Antwort, ohne Prüfbefehle (z. B. „Update verfügbar“ oder
+„nur lokal ausnutzbar“). Ohne Internet arbeitet die Funktion wie bisher mit festen Regeln und Prüfbefehlen; die Details
+nennen dann den Grund.
+
+**Prüfen:** Im Chat mit dem Modell *Wazuh-Analyse* einfach `Verbindungstest` schreiben. Die Antwort zeigt für NVD,
+Debian-Tracker und Sprachmodell einen Code:
+
+| Code | Bedeutung |
+|---|---|
+| **200** | erreichbar, alles in Ordnung |
+| **000** | keine Verbindung oder keine Antwort innerhalb von 8 Sekunden – der Open-WebUI-Container kommt nicht ins Internet (DNS, Firewall oder Proxy prüfen) |
+| **403** | Zugriff verweigert – meist zu viele Anfragen ohne API-Key, oder ein Proxy blockt |
+| **429** | zu viele Anfragen – eine Minute warten |
+| **5xx** | der Dienst ist gerade gestört – später noch mal |
+
+Dasselbe von Hand auf dem Docker-Host:
+`docker exec open-webui curl -s -m 10 -o /dev/null -w '%{http_code}\n' https://security-tracker.debian.org/tracker/CVE-2021-44228`
 
 ## Welches Sprachmodell?
 
@@ -59,6 +87,8 @@ Antwort. Ein 3–4B-Modell oder reine CPU reicht auch.
 
 - **Version:** Bereiche aus der Beschreibung („before“, „through“, „from X until Y“ …), Epoche, `+really`, Debian-Backport (`deb` → nie 🔴)
 - **Kernel:** Treiber aus der Beschreibung, fremde Architektur → 🟢, Kernel-Config und `lsmod` (Modul nicht geladen → 🟢)
+- **Online (optional):** Angriffsweg und Rechte aus der NVD, Fix-Stand der eigenen Debian-Version aus dem Debian-Tracker
+  (Versionsvergleich wie `dpkg`)
 - **Nach den Ausgaben:** Debian-Changelog, offene Ports bekannter Dienste, lokale Lücken, Client-Lücken, Secure Boot, Bibliotheken → nutzende Programme, alte CVEs → Debian-Tracker
 
 ## Grenzen
