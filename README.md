@@ -58,11 +58,25 @@ Nach dem Einfügen der Ausgabe:
 >
 > **Was tun:** Nichts sofort. Das nächste reguläre Kernel-Update schließt die Lücke ohnehin.
 
-**Paket-Meldung.** CVE-2026-97687 für `python3-urllib3`, Endergebnis nach den Prüfbefehlen:
+**Paket-Meldung.** Wazuh meldet CVE-2026-97687 für `python3-urllib3`. Erste Antwort (gekürzt):
+
+> **🟡 Betroffen – bitte prüfen, ob erreichbar**
+>
+> **CVE-2026-97687** · `python3-urllib3` 2.3.0-3+deb13u2 auf **server01** · Schweregrad High (CVSS 8.1)
+>
+> **Warum diese Einstufung:**
+> - Debian kennt die Lücke, für trixie gibt es aber **noch keinen Fix**.
+> - Angriffsweg laut NVD: über das Netzwerk, keine Rechte nötig, jemand muss mitwirken (z. B. Datei öffnen).
+> - `python3-urllib3` stammt aus dem Debian-Quellpaket `python-urllib3`. Meldet Wazuh CVE-2026-97687 für weitere
+>   Pakete aus `python-urllib3`, gilt dieselbe Bewertung – die müssen nicht einzeln geprüft werden.
+> - Ob die Lücke auf diesem Rechner erreichbar ist, zeigen die Befehle unten.
+
+Nach dem Einfügen der Ausgabe:
 
 > **🟡 Betroffen, aber derzeit nicht angreifbar**
 >
-> **Ergebnis:** Betroffen: **Ja** · Von außen angreifbar: **Nein** · Lokal ausnutzbar: **Unklar**
+> **Ergebnis:** Betroffen: **Ja** · Von außen angreifbar: **Nein** · Lokal ausnutzbar: **Nur über ein Programm, das
+> das Paket nutzt**
 >
 > **Warum:**
 > - Der Debian-Changelog von `python3-urllib3` erwähnt CVE-2026-97687 nicht. Der Fix ist also nicht eingebaut.
