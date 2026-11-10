@@ -1,5 +1,11 @@
 # Versionsgeschichte
 
+## 2.4 – 10.11.2026
+
+- Geändert: Kernel-Meldungen zu Programmen aus dem Kernel-Quelltext (z. B. `perf`) nennen das Debian-Paket, das
+  stattdessen betroffen sein kann (`linux-perf`), und wie man prüft, ob es installiert ist.
+- Geändert: Bei 🟢 steht der Angriffsweg nur noch in den Details.
+
 ## 2.3 – 10.11.2026
 
 - Geändert: „Lokal ausnutzbar“ steht bei Netz-Lücken nur noch auf „Ja“, wenn ein Dienst von außen erreichbar ist.

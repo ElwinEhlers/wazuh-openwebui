@@ -396,6 +396,18 @@ pg.valves.WORUM_SATZ = False
 pg.hole = lambda url, kopf=None: (429, "") if "/v6.12/" in url or "@v6.12/" in url or "h=v6.12" in url else fake_hole(url)
 a = pg.antworte({"messages": [{"role": "user", "content": json_von("CVE-2026-98999-xe")}]})
 pruefe("alle Makefile-Quellen 429: Name aus der Beschreibung", "grep -iE '_XE(_|=| )'" in a and "nicht abrufbar" in a, a[:200])
+# Programm aus tools/ (perf): Kernel nicht betroffen, Hinweis auf das eigene Debian-Paket, kein NVD-Satz bei Grün
+r = w.bewerte(w.lade_eintrag(json_von("CVE-2026-98999-xe")))
+r.update(nvd={"weg": "NETWORK", "rechte": "NONE", "interaktion": "NONE", "quelle": "NVD"},
+         dateien=["tools/perf/util/event.c"], kstand=None, bau=None,
+         debian={"release": "trixie", "status": "vulnerable", "fix": None, "unwichtig": False})
+a = w.antwort_a(w.wende_online_an(r), "")
+pruefe("tools/perf: grün mit Hinweis auf linux-perf", a.startswith("## 🟢") and "`linux-perf`" in a
+       and "dpkg -l linux-perf" in a and "Angriffsweg laut" not in a.split("---")[0]
+       and "| Angriffsweg (NVD) |" in a, a[:400])
+r = w.bewerte(w.lade_eintrag(json_von("CVE-2026-98999-xe")))
+r.update(nvd={}, dateien=["tools/testing/selftests/net/x.c"], kstand=None, bau=None, debian={})
+pruefe("tools/ ohne eigenes Paket: grün", w.antwort_a(w.wende_online_an(r), "").startswith("## 🟢"))
 # Kerncode (ohne CONFIG-Symbol): gleich fertig, ohne Befehle; mit Fix bei Debian -> Update verfügbar
 r = w.bewerte(w.lade_eintrag(json_von("CVE-2026-98999-xe")))
 r.update(nvd={}, dateien=["kernel/ptrace.c"], kstand=None, bau=[w.kbuild_loese("kernel/ptrace.c", lies)],

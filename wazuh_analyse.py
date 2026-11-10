@@ -4,7 +4,7 @@ author: Elwin Ehlers
 author_url: https://github.com/ElwinEhlers
 credits: Entwickelt mit Claude (Anthropic)
 description: Bewertet Wazuh-Schwachstellen-Einträge (wazuh-states-vulnerabilities) auf Debian/Ubuntu mit festen Regeln und öffentlichen Daten (Debian-Tracker, NVD, CVE.org, Bau-Regeln des Kernels) und wertet die Ausgaben der Prüfbefehle aus. Das Sprachmodell schreibt nur den Satz "Worum geht's" (optional).
-version: 2.3
+version: 2.4
 license: MIT
 """
 
@@ -239,6 +239,17 @@ def kernbereich(teile):
 
 # Quelldateien, die nicht zum laufenden Kernel gehören (Beispiele, Hilfsprogramme, Dokumentation)
 KEIN_KERNEL = ("Documentation/", "tools/", "samples/", "scripts/")
+# Programme aus tools/, die Debian in eigene Pakete packt: (Pfad, Programm, Debian-Paket)
+KERNEL_PROGRAMME = [("tools/perf/", "perf", "linux-perf"), ("tools/bpf/bpftool/", "bpftool", "bpftool"),
+                    ("tools/usb/usbip/", "usbip", "usbip"), ("tools/power/cpupower/", "cpupower", "linux-cpupower"),
+                    ("tools/power/x86/turbostat/", "turbostat", "linux-cpupower"),
+                    ("tools/power/x86/x86_energy_perf_policy/", "x86_energy_perf_policy", "linux-cpupower"),
+                    ("tools/hv/", "Hyper-V-Dienste", "hyperv-daemons")]
+
+
+def kernel_programm(dateien):
+    """Erstes Programm aus tools/, das Debian als eigenes Paket liefert -> (Programm, Paket) oder None."""
+    return next(((prog, paket) for d in dateien for pfad, prog, paket in KERNEL_PROGRAMME if d.startswith(pfad)), None)
 KBUILD_URL = "https://raw.githubusercontent.com/torvalds/linux/v{zweig}/{pfad}"
 # Ausweichquellen mit denselben Dateien, falls GitHub abweist (Code 429 bei zu vielen Anfragen)
 KBUILD_ERSATZ = ["https://cdn.jsdelivr.net/gh/torvalds/linux@v{zweig}/{pfad}",
@@ -1473,18 +1484,32 @@ def wende_online_kernel(r, nvd, deb):
         r["details"].append(("Betroffene Quelldateien", ", ".join(dateien[:4]) + (" …" if len(dateien) > 4 else "")))
 
     def fertig(ampel, kopf, grund, tun, betroffen, angr):
-        r.update(ampel=ampel, kopf=kopf, tun=tun, befehle=None, gruende=[grund] + nvd_grund,
+        # bei 🟢 steht der Angriffsweg nur in den Details: neben „nicht betroffen“ würde er nur verwirren
+        r.update(ampel=ampel, kopf=kopf, tun=tun, befehle=None,
+                 gruende=([grund] if isinstance(grund, str) else grund) + ([] if ampel == "gruen" else nvd_grund),
                  ergebnis={"betroffen": betroffen, "angreifbar": angr})
         return r
 
-    def gruen(grund):
-        return fertig("gruen", None, grund, None, "Nein", "Nein")
+    def gruen(grund, tun=None):
+        return fertig("gruen", None, grund, tun, "Nein", "Nein")
 
     fremd = sorted({d.split("/")[1] for d in quellen if d.startswith("arch/") and d.count("/") > 1} - {"x86"})
     if quellen and r["arch"] in X86 and all(d.startswith("arch/") and not d.startswith("arch/x86/") for d in quellen):
         return gruen(f"Die Lücke steckt in `{quellen[0]}`. Dieser Kernel-Teil ist nur für "
                      f"{ARCHITEKTUREN.get(fremd[0], fremd[0]) if fremd else 'andere Rechner-Arten'} gedacht, dieser "
                      f"Rechner ist aber ein PC ({r['arch']}).")
+    programm = kernel_programm(dateien) if dateien and not quellen else None
+    if programm:
+        prog, paket = programm
+        return gruen([f"Die Lücke steckt im Programm `{prog}` (`{dateien[0]}`), nicht im Kernel selbst. Der Kernel "
+                      f"`{r['paket']}` ist nicht betroffen.",
+                      f"`{prog}` liefert Debian im eigenen Paket `{paket}`. Ist es installiert, meldet Wazuh die Lücke "
+                      "dafür gesondert – nur diese Meldung ist dann zu prüfen."],
+                     f"Für `{r['paket']}` nichts. Nur falls `{paket}` installiert ist (`dpkg -l {paket} | grep ^ii`), "
+                     "dessen Update einspielen, sobald Debian es liefert.")
+    if dateien and not quellen and any(d.startswith("tools/") for d in dateien):
+        return gruen(f"Die Lücke steckt in einem Hilfsprogramm aus dem Kernel-Quelltext (`{dateien[0]}`), nicht im "
+                     "Kernel selbst. Der laufende Kernel ist nicht betroffen.")
     if dateien and not quellen:
         return gruen(f"Die Lücke steckt nur in Hilfsdateien des Kernel-Quelltexts (`{dateien[0]}`), nicht im "
                      "laufenden Kernel.")
@@ -1561,7 +1586,8 @@ def wende_online_paket(r, nvd, deb):
     angreifbar = "Ja" if weg == "NETWORK" else "Nein" if weg in ("LOCAL", "PHYSICAL") else "Unklar"
 
     def fertig(ampel, kopf, grund, tun, betroffen, angr):
-        r.update(ampel=ampel, kopf=kopf, tun=tun, befehle=None, gruende=[grund] + nvd_grund + quell_grund,
+        r.update(ampel=ampel, kopf=kopf, tun=tun, befehle=None,
+                 gruende=[grund] + ([] if ampel == "gruen" else nvd_grund) + quell_grund,
                  ergebnis={"betroffen": betroffen, "angreifbar": angr})
         return r
 
