@@ -1,82 +1,112 @@
 # Wazuh-Analyse für Open WebUI
 
-Eine Funktion für [Open WebUI](https://github.com/open-webui/open-webui), die **Schwachstellen-Meldungen aus Wazuh** auf
-Debian/Ubuntu bewertet. JSON aus `wazuh-states-vulnerabilities-*` in den Chat einfügen → Ampel 🟢/🟡/🔴, Begründung und
-Prüfbefehle. Ausgabe der Befehle einfügen → Endergebnis: **betroffen? von außen angreifbar? lokal ausnutzbar? was tun?**
+Eine Funktion für [Open WebUI](https://github.com/open-webui/open-webui), die **Schwachstellen-Meldungen aus Wazuh**
+bewertet: Meldung in den Chat einfügen und eine klare Antwort bekommen – **betroffen? von außen angreifbar? was tun?**
+
+**Debian/Ubuntu** · **läuft auch ohne Sprachmodell** · **Antworten auf Deutsch** · [MIT-Lizenz](LICENSE)
+
+## So funktioniert es
+
+1. In Wazuh einen Eintrag aus `wazuh-states-vulnerabilities-*` als JSON kopieren und in den Chat einfügen.
+2. Die Funktion antwortet mit Ampel, Begründung und – falls nötig – Prüfbefehlen für den betroffenen Rechner.
+3. Die Ausgabe der Befehle in denselben Chat einfügen. Die Funktion nennt das Endergebnis.
+
+| Ampel | Bedeutung |
+|---|---|
+| 🟢 | Kein Handlungsbedarf – mit Begründung, warum der Rechner nicht betroffen ist |
+| 🟡 | Betroffen oder noch offen – mit Angabe, ob die Lücke erreichbar ist und was zu tun ist |
+| 🔴 | Handlungsbedarf – Update verfügbar oder Lücke von außen erreichbar |
+
+Viele Meldungen klären sich schon in der ersten Antwort, ohne Befehle: etwa wenn Debian die Lücke längst behoben hat,
+der Fehler erst in einer neueren Version entstand oder ein Update bereitsteht.
 
 ## Beispiel
 
-> ## 🟡 Unklar – bitte prüfen
-> **CVE-2026-53791** · `rsync` 3.2.7-1+deb12u6 auf **monitor01** · Schweregrad Critical (CVSS 9.1)
+**Kernel-Meldung.** Wazuh meldet CVE-2026-98999 für `linux-image-amd64`. Erste Antwort (gekürzt):
+
+> **🟡 Unklar – bitte prüfen**
+>
+> **CVE-2026-98999** · `linux-image-amd64` 6.12.115-2 auf **server01** · Schweregrad High (CVSS 7.8)
 >
 > **Warum diese Einstufung:**
-> - Betroffen sind Versionen vor 3.5.0. Installiert ist 3.2.7 – das liegt im betroffenen Bereich.
-> - Aber: Debian-Zusatz `-1+deb12u6` – Debian baut Fixes oft nachträglich ein. Ob der Fix drin ist, zeigt der erste Befehl.
+> - Die Lücke steckt in `drivers/gpu/drm/xe/xe_bo.c`. Laut den Bau-Regeln des Kernels gehört das zu: `xe`.
+> - Für trixie gibt es noch **kein Kernel-Update** mit dem Fix.
+> - Ob dieser Teil in deinem Kernel eingebaut und geladen ist, zeigen die Befehle unten – geprüft wird genau das
+>   Config-Symbol aus den Bau-Regeln.
+> - Angriffsweg laut NVD: nur lokal (angemeldet oder über eine präparierte Datei), normales Benutzerkonto nötig.
 >
-> **Was tun:** Diese Befehle auf **monitor01** ausführen und die Ausgabe hier einfügen: …
+> **Was tun:** Diese Befehle auf **server01** ausführen und die komplette Ausgabe hier einfügen:
+>
+> ```bash
+> uname -rv
+> echo 'KERNEL-CHECK drivers/gpu/drm/xe/xe_bo.c CONFIG_DRM_XE xe'
+> grep -E '^(# )?CONFIG_(DRM_XE)[= ]' /boot/config-$(uname -r)
+> lsmod | grep -E '^(xe) ' || echo 'Modul nicht geladen'
+> …
+> ```
 
 Nach dem Einfügen der Ausgabe:
 
-> ## 🟡 Betroffen, aber derzeit nicht angreifbar
-> **Ergebnis:** Betroffen: **Ja** · Von außen angreifbar: **Nein** · Lokal ausnutzbar: **Unklar** – Fix fehlt, Port 873 (rsync) lauscht nicht.
+> **🟢 Kein Problem**
+>
+> **Ergebnis:** Betroffen: **Nein** · Von außen angreifbar: **Nein** · Lokal ausnutzbar: **Nein**
+>
+> **Warum:**
+> - Der betroffene Teil ist nur als Modul vorhanden und gerade nicht geladen: `xe`. Solange das Modul nicht geladen
+>   wird, ist die Lücke nicht erreichbar. Geladen würde es nur auf passender Hardware bzw. wenn die Funktion genutzt
+>   wird.
+>
+> **Was tun:** Nichts sofort. Das nächste reguläre Kernel-Update schließt die Lücke ohnehin.
+
+**Paket-Meldung.** CVE-2026-97687 für `python3-urllib3`, Endergebnis nach den Prüfbefehlen:
+
+> **🟡 Betroffen, aber derzeit nicht angreifbar**
+>
+> **Ergebnis:** Betroffen: **Ja** · Von außen angreifbar: **Nein** · Lokal ausnutzbar: **Unklar**
+>
+> **Warum:**
+> - Der Debian-Changelog von `python3-urllib3` erwähnt CVE-2026-97687 nicht. Der Fix ist also nicht eingebaut.
+> - Das Paket ist Python-Code, und kein von außen erreichbarer Dienst läuft mit Python (geprüft: 14 Prozesse mit
+>   offenem Netzwerk-Port). Über offene Ports ist die Lücke damit nicht erreichbar.
+> - Genutzt wird das Paket von: `python3-requests`, `python3-docker`.
+>
 > **Was tun:** Update einspielen, sobald Debian es liefert.
 
-## Warum Python und nicht das Sprachmodell?
+Weitere Meldungen mit den zugehörigen Befehlsausgaben liegen in [`beispiele/`](beispiele/).
 
-Zuerst bekam ein lokales LLM (Qwen3.5-9B, Qwen3.6-35B) das JSON mit einem Regel-Prompt. Die Ampel stimmte oft, aber nicht
-zuverlässig – und die Fehler waren gefährlich:
-
-- „3.1.13 < 3.2.9 → **nicht** betroffen“ → echte Lücke als 🟢
-- Debian-Backport-Regel übersprungen → 🔴 statt 🟡
-- Kernel-Prüfbefehl `grep -i drm/xe` findet nie etwas → falsche Entwarnung
-- Regeltext und doppelte Tabellen in der Antwort, 35–115 Sekunden pro Meldung
-
-Die Regeln (Versionen vergleichen, „deb“ suchen, Treibernamen lesen, Ports finden) sind eindeutig – das kann Code besser:
-immer gleiches Ergebnis, ~1 Sekunde, testbar. Das LLM schreibt nur noch den Satz „Worum geht's“.
-
-## Einbau
+## Einrichten
 
 1. Open WebUI → **Admin-Bereich → Funktionen → „+“**
 2. Name `Wazuh-Analyse`, ID `wazuh_analyse`
 3. Beispielcode löschen, Inhalt von [`wazuh_analyse.py`](wazuh_analyse.py) einfügen, **speichern**, Schalter **an**
-4. Zahnrad an der Funktion → Einstellungen eintragen
-5. Seite neu laden → Modell **Wazuh-Analyse** wählen
+4. Zahnrad an der Funktion → Einstellungen eintragen (siehe Tabelle)
+5. Seite neu laden → im Chat das Modell **Wazuh-Analyse** wählen
+6. Zum Prüfen `Verbindungstest` in den Chat schreiben
 
 | Einstellung | Bedeutung | Standard |
 |---|---|---|
 | `LLM_URL` | OpenAI-kompatible API (llama.cpp, Ollama, vLLM, OpenAI …), aus dem Open-WebUI-Container erreichbar. Mehrere Adressen möglich, eine pro Zeile – die erste erreichbare wird genutzt | `http://localhost:8080/v1` |
 | `LLM_KEY` | API-Key, falls nötig | leer |
 | `LLM_MODELL` | Modellname | leer |
-| `WORUM_SATZ` | Satz „Worum geht's“ vom LLM; aus = ganz ohne LLM | an |
-| `ONLINE` | NVD und CVE.org (Angriffsweg), Debian-Tracker (Fix-Stand) und bei Kernel-Meldungen die Bau-Regeln des Kernels (GitHub) abfragen; braucht Internet im Open-WebUI-Container | an |
+| `WORUM_SATZ` | Satz „Worum geht's“ vom Sprachmodell; aus = ganz ohne Sprachmodell | an |
+| `ONLINE` | Öffentliche Datenquellen abfragen (siehe unten); braucht Internet im Open-WebUI-Container | an |
 | `NVD_KEY` | Optionaler [NVD-API-Key](https://nvd.nist.gov/developers/request-an-api-key) für mehr Anfragen pro Minute | leer |
 
-## Internet: Daten statt Stichwörter
+## Woher die Daten kommen
 
-Seit Version 2.0 entscheidet die Funktion nach öffentlichen Daten zur CVE, nicht nach Stichwörtern für einzelne Meldungen.
-Neue Meldungen brauchen deshalb in der Regel keine neue Code-Fassung mehr. Mit Internet fragt sie ab:
+Die Funktion entscheidet nach öffentlichen Daten zur CVE und nach dem, was die Prüfbefehle auf dem Rechner zeigen.
 
-- **Debian-Tracker** (security-tracker.debian.org): Stand für die Debian-Version des Rechners – behoben in Version X,
-  offen, ignoriert, unwichtig oder nicht betroffen. Gilt für Pakete und für den Kernel
-- **NVD** (nvd.nist.gov): Angriffsweg – über das Netzwerk, nur lokal oder nur mit Zugriff am Gerät – und nötige Rechte
-- **CVE.org** (cveawg.mitre.org): derselbe Angriffsweg vom Herausgeber der CVE, falls die NVD nichts hat oder nicht
-  antwortet; bekannte Ausnutzung laut CISA; bei Kernel-CVEs die **betroffenen Quelldateien** und ab welcher
-  Kernel-Version der Fehler vorhanden bzw. behoben ist
-- **Makefiles des Kernels** (GitHub, nur bei Kernel-Meldungen): Aus der Quelldatei wird das genaue Config-Symbol und der
-  Modulname, z. B. `drivers/gpu/drm/xe/xe_bo.c` → `CONFIG_DRM_XE` → Modul `xe`. Der Prüfbefehl fragt genau das ab
+| Quelle | Wofür |
+|---|---|
+| [Debian-Tracker](https://security-tracker.debian.org) | Stand für die Debian-Version des Rechners: behoben in Version X, offen, nicht betroffen |
+| [NVD](https://nvd.nist.gov) | Angriffsweg (Netzwerk, lokal, nur am Gerät) und nötige Rechte |
+| [CVE.org](https://www.cve.org) | Angriffsweg vom Herausgeber der CVE, bekannte Ausnutzung (CISA); bei Kernel-Meldungen die betroffenen Quelldateien und Versionen |
+| Makefiles des Linux-Kernels (GitHub, ersatzweise jsDelivr und kernel.org) | Nur bei Kernel-Meldungen: Quelldatei → Config-Symbol → Modulname, damit der Prüfbefehl genau das Richtige abfragt |
 
-Ist das eindeutig, steht das Endergebnis schon in der ersten Antwort, ohne Prüfbefehle (z. B. „Update verfügbar“, „nur
-lokal ausnutzbar“, „Fehler kam erst mit Kernel 6.8“). Ohne Internet arbeitet die Funktion mit den Regeln aus der
-Beschreibung und den Prüfbefehlen; die Details nennen dann den Grund. 🟢 gibt es ohne Internet nur mit Beleg.
+**Ohne Internet** arbeitet die Funktion mit den Angaben aus der Meldung und den Prüfbefehlen. Die Antwort nennt dann in
+den Details, welche Quelle fehlte.
 
-**Warum das beim Kernel wichtig ist:** Bis Version 1.25 wurde der Treibername aus der Beschreibung geraten („gpio: mxc:“ →
-`grep _MXC`). Eine Gegenprobe mit 899 Kernel-CVEs von 2026 auf einem Debian-13-Rechner zeigte: Bei 22 % der Lücken in
-wirklich aktivem Kernel-Code ergab das fälschlich 🟢 (z. B. `ptrace`, `workqueue`, `io_uring`, `mm/huge_memory`). Mit den
-Makefiles lassen sich 87 % der Meldungen genau zuordnen; der Rest wird wie bisher über den Namen geprüft, bekommt aber
-ohne Beleg kein 🟢 mehr.
-
-**Prüfen:** Im Chat mit dem Modell *Wazuh-Analyse* einfach `Verbindungstest` schreiben. Die Antwort zeigt für NVD, CVE.org, GitHub,
-Debian-Tracker und Sprachmodell einen Code:
+**Verbindung prüfen:** `Verbindungstest` in den Chat schreiben. Die Antwort zeigt für jede Quelle einen Code:
 
 | Code | Bedeutung |
 |---|---|
@@ -89,39 +119,42 @@ Debian-Tracker und Sprachmodell einen Code:
 Dasselbe von Hand auf dem Docker-Host:
 `docker exec open-webui curl -s -m 10 -o /dev/null -w '%{http_code}\n' https://security-tracker.debian.org/tracker/CVE-2021-44228`
 
+## Was geprüft wird
+
+| Bereich | Prüfung |
+|---|---|
+| **Pakete** | Ist die Lücke in der eigenen Debian-Version behoben, und ist die installierte Version neu genug (Vergleich wie `dpkg`)? Versionsbereiche aus der Beschreibung, Debian-Backports, Debian-Changelog. |
+| **Kernel** | Ist der betroffene Teil im Kernel eingebaut, und ist das Modul geladen? Dazu: fremde Architektur, Fehler erst in neuerem Kernel, Fix schon installiert, laufender Kernel älter als der installierte. |
+| **Erreichbarkeit** | Nutzt ein Dienst mit offenem Netzwerk-Port das Paket? Geprüft an den laufenden Prozessen, ohne feste Port-Liste. Dazu der Angriffsweg: Netzwerk, nur lokal, nur über eine geöffnete Datei oder eine ausgehende Verbindung. |
+
+Alle Prüfbefehle lesen nur, sie ändern nichts am Rechner.
+
+## Warum feste Regeln?
+
+- **Gleiche Eingabe, gleiches Ergebnis.** Die Bewertung rechnet Python nach festen Regeln, nicht ein Sprachmodell.
+- **Jede Einstufung nennt ihren Beleg** – die Quelle, die Zeile aus der Kernel-Config, den Prozess mit offenem Port.
+- **Schnell und ohne Grafikkarte nutzbar.** Das Sprachmodell schreibt nur den Satz „Worum geht's“ und lässt sich
+  abschalten.
+
 ## Welches Sprachmodell?
 
 Jedes kleine Modell, das Deutsch kann – es schreibt nur einen Satz. Getestet mit **Qwen3.5-9B** (Unsloth UD-Q4_K_XL) auf
-`llama-server`, **RTX 3060 Ti 8 GB**, Ryzen 7 3700X, 32 GB RAM, Debian 13, Open WebUI 0.13.0, Wazuh 4.14.10: ~1 Sekunde pro
-Antwort. Ein 3–4B-Modell oder reine CPU reicht auch.
-
-## Was geprüft wird
-
-- **Version:** Bereiche aus der Beschreibung („before“, „through“, „from X until Y“, „X before Y“, Fix-Listen je Zweig,
-  „X and below“ …), Epoche, `+really`, Debian-Backport (`deb` → nie 🔴). 🟢 allein aus der Versionsangabe nur, wenn die
-  Beschreibung das Paket auch nennt
-- **Kernel:** Quelldateien der CVE → Config-Symbol und Modul aus den Makefiles → `grep` auf genau dieses Symbol, `lsmod` auf
-  genau dieses Modul. Fremde Architektur, Fehler erst in neuerem Kernel, Fix schon installiert → sofort 🟢. Nicht
-  eingebaut oder Modul nicht geladen → 🟢; Netzwerk-Module, die der Kernel bei Bedarf selbst lädt → 🟡 mit Sperr-Befehl
-- **Online (optional):** Angriffsweg und Rechte (NVD, sonst CVE.org), Fix-Stand der eigenen Debian-Version aus dem
-  Debian-Tracker (Versionsvergleich wie `dpkg`), bekannte Ausnutzung (CISA)
-- **Nach den Ausgaben:** Debian-Changelog; **Netz-Check**: Welche Prozesse mit offenem Netzwerk-Port gehören zum Paket
-  oder haben es geladen (Vergleich der Paketdateien mit `/proc/PID/maps`, ohne feste Port-Liste) – eigener Dienst von
-  außen erreichbar → 🔴, Bibliothek in erreichbarem Dienst geladen → 🟡 „möglich“, sonst nicht über offene Ports
-  angreifbar; dazu lokale Lücken, Client-Lücken, Secure Boot, nutzende Programme
+`llama-server`, RTX 3060 Ti 8 GB, Debian 13, Open WebUI 0.13.0, Wazuh 4.14.10: 1–4 Sekunden pro Antwort. Ein
+3–4B-Modell oder reine CPU reicht auch.
 
 ## Grenzen
 
-Nur Debian/Ubuntu und nur Schwachstellen-Einträge (keine Alerts). Ohne Internet wird nur die Beschreibung per Muster
-gelesen. Ob ein Paket den betroffenen Code wirklich enthält, prüft die Funktion nur über den Namen (im Zweifel 🟡). Rund
-jede achte Kernel-Meldung lässt sich aus den Makefiles nicht eindeutig zuordnen und wird über den Namen geprüft. Der
-Netz-Check sieht nur Prozesse, die gerade laufen, und braucht root. Ausgabe auf Deutsch.
-**Ein 🟢 ist eine begründete Einschätzung, keine Garantie.**
+- Nur Debian/Ubuntu und nur Schwachstellen-Einträge (keine Alerts).
+- Ob ein Paket den betroffenen Code wirklich enthält, prüft die Funktion über den Namen; im Zweifel bleibt es bei 🟡.
+- Rund jede achte Kernel-Meldung lässt sich nicht genau einer Kernel-Option zuordnen. Dann wird über den Namen aus
+  der Beschreibung geprüft, und 🟢 gibt es nur mit eindeutigem Beleg.
+- Die Prüfung der Erreichbarkeit sieht nur Prozesse, die gerade laufen, und braucht root.
+- **Ein 🟢 ist eine begründete Einschätzung, keine Garantie.**
 
 ## Test
 
-`python3 -I test/test_wazuh_analyse.py` prüft die [`beispiele/`](beispiele/) ohne Open WebUI und ohne LLM. Nur für Änderungen
-am Code nötig.
+`python3 -I test/test_wazuh_analyse.py` prüft die [`beispiele/`](beispiele/) ohne Open WebUI und ohne Sprachmodell. Nur
+für Änderungen am Code nötig. Die Versionsgeschichte steht in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Lizenz
 
