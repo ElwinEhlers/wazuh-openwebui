@@ -1,5 +1,11 @@
 # Versionsgeschichte
 
+## 2.5 – 10.11.2026
+
+- Geändert: Unterstützt wird Debian (getestet mit 12 und 13). Auf Ubuntu arbeitet die Funktion vorsichtig:
+  Ubuntu-Versionen gelten wie Debian-Backports (Changelog-Prüfung statt 🔴), bei Ubuntu-Kerneln entfällt der
+  Versionsvergleich mit kernel.org, und die Details nennen, dass kein Fix-Stand abgefragt wird.
+
 ## 2.4 – 10.11.2026
 
 - Geändert: Kernel-Meldungen zu Programmen aus dem Kernel-Quelltext (z. B. `perf`) nennen das Debian-Paket, das

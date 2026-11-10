@@ -7,7 +7,7 @@ Copy the parts below into the form at openwebui.com → Functions → Create.
 **Type:** Pipe
 
 **Short description:**
-Rule-based triage of Wazuh vulnerability findings on Debian/Ubuntu – traffic-light verdict, reasons and the exact commands to verify. Works without an LLM. Output in German.
+Rule-based triage of Wazuh vulnerability findings on Debian – traffic-light verdict, reasons and the exact commands to verify. Works without an LLM. Output in German.
 
 **Description:**
 
@@ -32,6 +32,6 @@ Settings (valves): `LLM_URL` (any OpenAI-compatible API: llama.cpp, Ollama, vLLM
 
 Tested setup: RTX 3060 Ti 8 GB, Ryzen 7 3700X, 32 GB RAM, Debian 13, llama.cpp `llama-server` with Qwen3.5-9B (Unsloth UD-Q4_K_XL, fully on GPU), Open WebUI 0.13.0, Wazuh 4.14.10 – 1–4 seconds per answer. Any small model (3–4B, even CPU-only) is enough for the single sentence; the verdict itself needs no LLM.
 
-Limitations: Debian/Ubuntu agents only, vulnerability state documents only (no alerts). About one in eight kernel findings cannot be mapped to an exact kernel option and is checked by name. **Output is in German.** A 🟢 is a well-founded assessment, not a guarantee.
+Limitations: Debian agents only (tested with 12 and 13; Ubuntu is untested – the function stays cautious there, without checking the fix status), vulnerability state documents only (no alerts). About one in eight kernel findings cannot be mapped to an exact kernel option and is checked by name. **Output is in German.** A 🟢 is a well-founded assessment, not a guarantee.
 
 Developed by Elwin Ehlers with Claude (Anthropic). Tested with Open WebUI 0.13.0. Source, examples and tests: https://github.com/ElwinEhlers/wazuh-openwebui

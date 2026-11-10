@@ -3,7 +3,7 @@
 Eine Funktion für [Open WebUI](https://github.com/open-webui/open-webui), die **Schwachstellen-Meldungen aus Wazuh**
 bewertet: Meldung in den Chat einfügen und eine klare Antwort bekommen – **betroffen? von außen angreifbar? was tun?**
 
-**Debian/Ubuntu** · **läuft auch ohne Sprachmodell** · **Antworten auf Deutsch** · [MIT-Lizenz](LICENSE)
+**Debian** · **läuft auch ohne Sprachmodell** · **Antworten auf Deutsch** · [MIT-Lizenz](LICENSE)
 
 ## So funktioniert es
 
@@ -158,7 +158,8 @@ Jedes kleine Modell, das Deutsch kann – es schreibt nur einen Satz. Getestet m
 
 ## Grenzen
 
-- Nur Debian/Ubuntu und nur Schwachstellen-Einträge (keine Alerts).
+- Nur Debian (getestet mit 12 und 13) und nur Schwachstellen-Einträge (keine Alerts). Ubuntu ist ungetestet: Die
+  Funktion arbeitet dort vorsichtig (kein Abgleich mit dem Fix-Stand, eher 🟡), aber ohne Gewähr.
 - Ob ein Paket den betroffenen Code wirklich enthält, prüft die Funktion über den Namen; im Zweifel bleibt es bei 🟡.
 - Rund jede achte Kernel-Meldung lässt sich nicht genau einer Kernel-Option zuordnen. Dann wird über den Namen aus
   der Beschreibung geprüft, und 🟢 gibt es nur mit eindeutigem Beleg.

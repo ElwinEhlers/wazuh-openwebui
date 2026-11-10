@@ -3,8 +3,8 @@ title: Wazuh-Analyse
 author: Elwin Ehlers
 author_url: https://github.com/ElwinEhlers
 credits: Entwickelt mit Claude (Anthropic)
-description: Bewertet Wazuh-Schwachstellen-Einträge (wazuh-states-vulnerabilities) auf Debian/Ubuntu mit festen Regeln und öffentlichen Daten (Debian-Tracker, NVD, CVE.org, Bau-Regeln des Kernels) und wertet die Ausgaben der Prüfbefehle aus. Das Sprachmodell schreibt nur den Satz "Worum geht's" (optional).
-version: 2.4
+description: Bewertet Wazuh-Schwachstellen-Einträge (wazuh-states-vulnerabilities) auf Debian mit festen Regeln und öffentlichen Daten (Debian-Tracker, NVD, CVE.org, Bau-Regeln des Kernels) und wertet die Ausgaben der Prüfbefehle aus. Das Sprachmodell schreibt nur den Satz "Worum geht's" (optional).
+version: 2.5
 license: MIT
 """
 
@@ -607,6 +607,11 @@ def bewerte(e):
     else:  # ältere Einträge ohne host.os: Debian-Version aus dem Zusatz "+deb13u1" ablesen
         m_deb = None if plattform else re.search(r"deb(\d+)", str(r["version"]))
         r["release"] = DEBIAN_NAMEN.get(m_deb.group(1)) if m_deb else None
+    # Ubuntu ist ungetestet: kein Fix-Stand-Abgleich, kein kernel.org-Versionsvergleich, Backports wie bei Debian
+    r["ubuntu"] = plattform == "ubuntu" or "ubuntu" in str(r["version"]).lower()
+    if r["ubuntu"]:
+        r["details"].append(("Fix-Stand", "Ubuntu wird nicht abgefragt (nur der Debian-Tracker) – Bewertung über "
+                                          "die Prüfbefehle"))
     m_fix = re.fullmatch(r"Package less than (\S+)", str(r["bedingung"]).strip())
     r["fix_wazuh"] = m_fix.group(1) if m_fix else None
     m_cve = re.match(r"CVE-(\d{4})-", str(r["cve"]))
@@ -658,7 +663,8 @@ def bewerte(e):
 
     r["typ"] = "paket"
     rein, zusatz = bereinige_version(r["version"])
-    backport = "deb" in zusatz.lower()
+    backport = "deb" in zusatz.lower() or "ubuntu" in zusatz.lower()
+    distri = "Ubuntu" if "ubuntu" in zusatz.lower() else "Debian"
     bereiche = bereiche_aus_beschreibung(beschreibung)
     ver, bereich, fix = pruefe_version(rein, bereiche)
     regel = ", ".join(text_bereich(*b) for b in bereiche) if bereiche else "keine Grenze genannt"
@@ -678,7 +684,7 @@ def bewerte(e):
                             "das liegt im betroffenen Bereich.")
         if backport:
             r["ampel"] = "gelb"
-            r["gruende"].append(f"Aber: Die Version trägt den Debian-Zusatz `{zusatz}`. Debian baut Sicherheits-Fixes "
+            r["gruende"].append(f"Aber: Die Version trägt den {distri}-Zusatz `{zusatz}`. {distri} baut Sicherheits-Fixes "
                                 "oft nachträglich ein, ohne die Versionsnummer zu ändern. Ob der Fix drin ist, "
                                 "zeigt der erste Prüfbefehl.")
         elif komponente == "ja":
@@ -714,7 +720,7 @@ def bewerte(e):
             r["befehle"] = "sysctl dev.tty.legacy_tiocsti"
             r["lesen"] = ("**= 0** heißt: Der Kernel sperrt TIOCSTI, die Lücke ist nicht ausnutzbar. **= 1** oder "
                           "„unknown key“ heißt: ausnutzbar für jemanden, der schon angemeldet ist.")
-    r["details"] += [("Bereinigte Version", rein), ("Debian-Zusatz", zusatz or "–"),
+    r["details"] += [("Bereinigte Version", rein), (f"{distri}-Zusatz", zusatz or "–"),
                      ("Regel aus der Beschreibung", regel), ("Fix-Version", fix or "–"),
                      ("Paket im Text genannt", "ja" if komponente == "ja" else "nein")]
     if r["fix_wazuh"]:
@@ -1824,7 +1830,9 @@ class Pipe:
             hinweis = ""
         if r["typ"] == "kernel" and org:
             r["dateien"] = org.get("dateien") or []
-            r["kstand"] = kernel_stand(bereinige_version(r["version"])[0], org.get("versionen"))
+            # Ubuntu-Kernel (6.8.0-45) zählen anders als kernel.org und enthalten eigene Backports: kein Vergleich
+            r["kstand"] = None if r.get("ubuntu") else kernel_stand(bereinige_version(r["version"])[0],
+                                                                     org.get("versionen"))
             r["bau"], r["bau_info"] = self.kernel_bau(r)
             hinweis = hinweis and (" – soweit möglich mit den übrigen Quellen bewertet. Prüfen: im Chat "
                                    "„Verbindungstest“ schreiben.")

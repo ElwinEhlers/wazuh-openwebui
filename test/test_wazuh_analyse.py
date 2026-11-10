@@ -408,6 +408,22 @@ pruefe("tools/perf: grün mit Hinweis auf linux-perf", a.startswith("## 🟢") a
 r = w.bewerte(w.lade_eintrag(json_von("CVE-2026-98999-xe")))
 r.update(nvd={}, dateien=["tools/testing/selftests/net/x.c"], kstand=None, bau=None, debian={})
 pruefe("tools/ ohne eigenes Paket: grün", w.antwort_a(w.wende_online_an(r), "").startswith("## 🟢"))
+# Ubuntu (ungetestet): kein vorschnelles Rot, kein Grün aus dem kernel.org-Versionsvergleich
+e = {"agent": {"name": "h"}, "host": {"os": {"platform": "ubuntu", "version": "24.04"}},
+     "package": {"name": "rsync", "version": "3.2.7-1ubuntu0.3"},
+     "vulnerability": {"id": "CVE-X", "description": "rsync before 3.5.0 has a flaw"}}
+r = w.bewerte(e)
+pruefe("Ubuntu-Paket im Bereich: Gelb statt Rot", r["ampel"] == "gelb" and "Ubuntu-Zusatz" in " ".join(r["gruende"])
+       and r["release"] is None, r["gruende"])
+po = w.Pipe()
+po.valves.WORUM_SATZ = False
+po.hole = fake_hole
+e = w.lade_eintrag(json_von("CVE-2026-98999-xe"))
+e["host"]["os"] = {"platform": "ubuntu", "version": "24.04"}
+e["package"]["version"] = "6.1.0-45.45"  # kernel.org: Fehler erst ab 6.8 -> bei Debian wäre das Grün
+a = po.antworte({"messages": [{"role": "user", "content": w.json.dumps(e)}]})
+pruefe("Ubuntu-Kernel: kein Grün aus dem Versionsvergleich", not a.startswith("## 🟢")
+       and "Ubuntu wird nicht abgefragt" in a, a[:200])
 # Kerncode (ohne CONFIG-Symbol): gleich fertig, ohne Befehle; mit Fix bei Debian -> Update verfügbar
 r = w.bewerte(w.lade_eintrag(json_von("CVE-2026-98999-xe")))
 r.update(nvd={}, dateien=["kernel/ptrace.c"], kstand=None, bau=[w.kbuild_loese("kernel/ptrace.c", lies)],
