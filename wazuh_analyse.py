@@ -3,8 +3,8 @@ title: Wazuh-Analyse
 author: Elwin Ehlers
 author_url: https://github.com/ElwinEhlers
 credits: Entwickelt mit Claude (Anthropic)
-description: Bewertet Wazuh-Schwachstellen-Einträge (wazuh-states-vulnerabilities) auf Debian/Ubuntu mit festen Regeln und wertet die Ausgaben der Prüfbefehle aus. Das Sprachmodell schreibt nur den Satz "Worum geht's" (optional).
-version: 1.25
+description: Bewertet Wazuh-Schwachstellen-Einträge (wazuh-states-vulnerabilities) auf Debian/Ubuntu mit festen Regeln und öffentlichen Daten (Debian-Tracker, NVD, CVE.org, Bau-Regeln des Kernels) und wertet die Ausgaben der Prüfbefehle aus. Das Sprachmodell schreibt nur den Satz "Worum geht's" (optional).
+version: 2.1
 license: MIT
 """
 
@@ -14,6 +14,13 @@ license: MIT
 # Ablauf im Chat:
 #   1. Wazuh-JSON einfügen  -> Ampel, Begründung, Prüfbefehle
 #   2. Ausgabe der Prüfbefehle einfügen -> Endergebnis (betroffen / angreifbar / was tun)
+#
+# Grundsatz: Entschieden wird nach Daten, nicht nach Stichwörtern für einzelne Meldungen.
+#   Pakete: Debian-Tracker (Fix-Stand), CVSS von NVD/CVE.org (Angriffsweg), auf dem Rechner der Netz-Check
+#           (welcher Dienst mit offenem Port nutzt das Paket).
+#   Kernel: betroffene Quelldateien und Versionen von kernel.org (über CVE.org), Makefiles des Kernels
+#           (Datei -> CONFIG-Symbol -> Modul), auf dem Rechner genau dieses Symbol und dieses Modul.
+#   Ohne Internet gelten die Regeln aus der Beschreibung; Grün gibt es dann nur mit Beleg.
 
 import asyncio
 import copy
@@ -62,28 +69,44 @@ def vergleiche(a, b):
     return 0
 
 
-VER = r"v?(\d+(?:\.\d+)+[a-z]?\d*)"
-LISTE = r"((?:\s*,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+)" + VER + r")*"
+VER = r"v?(\d+(?:\.\d+)+(?:_\d+)?[a-z]?\d*)"
+# weitere Versionen einer Aufzählung; nicht, wenn danach ein neuer Bereich beginnt ("…, 3.3.0 to before 3.3.11")
+LISTE = (r"((?:\s*,\s*(?:and\s+|or\s+)?|\s+(?:and|or)\s+)" + VER +
+         r"(?!\.?\w)(?!\s*(?:to|until|till|through|before|prior|up)\b)(?!\s+-\s))*")
 
 
 def bereiche_aus_beschreibung(text):
-    """Liste von (untere, obere, art) mit art 'lt' (vor) oder 'le' (bis einschließlich)."""
+    """Liste von (untere, obere, art) mit art 'lt' (vor) oder 'le' (bis einschließlich).
+    Mehrere Einträge mit derselben unteren Grenze sind Fix-Versionen verschiedener Zweige."""
     t = " " + text.lower() + " "
     bereiche = []
 
     def weg(m):
         return " " * (m.end() - m.start())
 
-    # "3.0.0 to before 3.2.9"
-    muster = (rf"{VER}\s*(?:(?:to|-|until|up to)\s*(?:before|prior to|but not including|excluding)|"
-              rf"until|till|up until)\s*{VER}")
+    def dazu(u, o, art):
+        if u and vergleiche(u, o) > 0:  # „von 7.8 bis 1.1“: falsch gelesen, verwerfen
+            return
+        if (u, o, art) not in bereiche:
+            bereiche.append((u, o, art))
+
+    # "3.0.0 to before 3.2.9" / "from 1.0.0 until 1.10.6 and 2.14.3" (Fix je Zweig)
+    muster = (rf"{VER}\s*(?:(?:to|until|up to)\s*(?:before|prior to|but not including|excluding)|"
+              rf"until|till|up until)\s*{VER}{LISTE}")
     for m in re.finditer(muster, t):
-        bereiche.append((m.group(1), m.group(2), "lt"))
+        for o in re.findall(VER, m.group(0))[1:]:
+            dazu(m.group(1), o, "lt")
     t = re.sub(muster, weg, t)
-    # "9.18.0 through 9.18.27" / "1.2 to 1.5"
-    muster = rf"{VER}\s*(?:through|to|up to and including|up to|-)\s*{VER}"
+    # "6.0 before 6.0.3, 5.2 before 5.2.12, and 4.2 before 4.2.29"
+    muster = rf"{VER}\s+(?:before|prior to)\s+{VER}{LISTE}"
     for m in re.finditer(muster, t):
-        bereiche.append((m.group(1), m.group(2), "le"))
+        for o in re.findall(VER, m.group(0))[1:]:
+            dazu(m.group(1), o, "lt")
+    t = re.sub(muster, weg, t)
+    # "9.18.0 through 9.18.27" / "1.2 to 1.5" / "7.0.0 - 7.0.8"
+    muster = rf"{VER}(?:\s*(?:through|to|up to and including|up to)\s*|\s+-\s+){VER}"
+    for m in re.finditer(muster, t):
+        dazu(m.group(1), m.group(2), "le")
     t = re.sub(muster, weg, t)
     # "before 3.2.9, 3.3.11, and 3.4.11"
     for wort, art in ((r"(?:before|prior to|earlier than|older than|<)", "lt"),
@@ -91,12 +114,18 @@ def bereiche_aus_beschreibung(text):
         muster = rf"{wort}\s*(?:versions?\s*)?{VER}{LISTE}"
         for m in re.finditer(muster, t):
             for v in re.findall(VER, m.group(0)):
-                bereiche.append((None, v, art))
+                dazu(None, v, art)
         t = re.sub(muster, weg, t)
-    # nur wenn sonst nichts gefunden: "fixed in version 2.8.0" / "patched in 1.2.3"
+    # "1.36.37 and below" / "2.4 or earlier"
+    muster = rf"{VER}\s+(?:and|or)\s+(?:below|earlier|prior|older|lower)\b"
+    for m in re.finditer(muster, t):
+        dazu(None, m.group(1), "le")
+    t = re.sub(muster, weg, t)
+    # nur wenn sonst nichts gefunden: "fixed in version 2.8.0" / "patched in 4.0.14, 5.0.10 and 6.10"
     if not bereiche:
-        for m in re.finditer(rf"(?:fixed|patched|resolved|addressed) in (?:versions?\s*)?{VER}", t):
-            bereiche.append((None, m.group(1), "lt"))
+        for m in re.finditer(rf"(?:fixed|patched|resolved|addressed) in (?:versions?\s*)?{VER}{LISTE}", t):
+            for v in re.findall(VER, m.group(0)):
+                dazu(None, v, "lt")
     return bereiche
 
 
@@ -111,34 +140,41 @@ def pruefe_version(installiert, bereiche):
     if not bereiche:
         return "keine", None, None
 
-    def drin(u, o, art):
-        if u and vergleiche(installiert, u) < 0:
-            return False
-        c = vergleiche(installiert, o)
-        return c < 0 if art == "lt" else c <= 0
+    def darunter(b):
+        c = vergleiche(installiert, b[1])
+        return c < 0 if b[2] == "lt" else c <= 0
 
-    mit_unten = [b for b in bereiche if b[0]]
-    nur_oben = [b for b in bereiche if not b[0]]
-    for b in mit_unten:
-        if drin(*b):
-            return "ja", b, (b[1] if b[2] == "lt" else None)
-    if nur_oben:
-        zweig = vteile(installiert)[:2]
-        gleich = [b for b in nur_oben if vteile(b[1])[:2] == zweig]
-        kandidaten = gleich or nur_oben
-        if len(kandidaten) == 1 or gleich:
-            b = kandidaten[0]
-            if drin(*b):
-                return "ja", b, (b[1] if b[2] == "lt" else None)
-            return "nein", b, None
+    def ja(b):
+        return "ja", b, (b[1] if b[2] == "lt" else None)
+
+    zweig = vteile(installiert)[:2]
+    gruppen = {}  # untere Grenze -> Bereiche; mehrere = Fix-Versionen verschiedener Zweige
+    for b in bereiche:
+        gruppen.setdefault(b[0], []).append(b)
+    unklar, nein = False, None
+    for unten, gruppe in gruppen.items():
+        if unten and vergleiche(installiert, unten) < 0:
+            nein = nein or gruppe[0]
+            continue
+        gleich = [b for b in gruppe if vteile(b[1])[:2] == zweig]
+        kandidaten = gleich or [b for b in gruppe if vteile(b[1])[:1] == zweig[:1]] or gruppe
+        if gleich or len(kandidaten) == 1:
+            treffer = [b for b in kandidaten if darunter(b)]
+            if treffer:
+                return ja(max(treffer, key=lambda b: vteile(b[1])))
+            nein = nein or kandidaten[0]
+            continue
         kleinste = min(kandidaten, key=lambda b: vteile(b[1]))
         groesste = max(kandidaten, key=lambda b: vteile(b[1]))
-        if drin(*kleinste):
-            return "ja", kleinste, (kleinste[1] if kleinste[2] == "lt" else None)
-        if not drin(*groesste):
-            return "nein", groesste, None
+        if darunter(kleinste):
+            return ja(kleinste)
+        if darunter(groesste):  # zwischen zwei Fix-Versionen, eigener Zweig nicht genannt
+            unklar = True
+        else:
+            nein = nein or groesste
+    if unklar:
         return "unklar", None, None
-    return "nein", mit_unten[0], None
+    return "nein", nein or bereiche[0], None
 
 
 # ---------------------------------------------------------------- Kernel
@@ -175,8 +211,198 @@ def modul_muster(treiber):
 
 
 def kernel_befehle(treiber):
-    return (f"uname -r\ngrep -iE '{config_muster(treiber)}' /boot/config-$(uname -r)\n"
+    return (f"uname -rv\ngrep -iE '{config_muster(treiber)}' /boot/config-$(uname -r)\n"
             f"lsmod | grep -iE '{modul_muster(treiber)}' || echo 'Modul nicht geladen'")
+
+
+# Namen aus der Beschreibung, die keinen einzelnen Treiber meinen, sondern Kerncode, der in jedem Kernel steckt.
+# Nur für die Bewertung ohne Internet; mit Internet entscheiden die Quelldateien und die Bau-Regeln des Kernels.
+KERN_ZUERST = {"mm", "sched", "kernel", "bpf", "tracing", "perf", "io_uring", "locking", "rcu", "cgroup", "x86",
+               "block", "ipc", "security", "lib", "init"}
+KERN_BEREICHE = KERN_ZUERST | {
+    "net", "fs", "vfs", "futex", "time", "timers", "irq", "genirq", "signal", "exec", "proc", "sysfs", "kernfs",
+    "namespace", "pid", "fork", "module", "workqueue", "tcp", "udp", "ipv4", "ipv6", "inet", "ptrace", "slab",
+    "memcg", "hugetlb", "printk", "epoll", "pipe", "iomap", "writeback", "dcache", "audit", "seccomp", "lsm", "keys",
+    "random", "tty", "acpi", "acpica", "pci", "core", "skbuff", "sock", "socket", "xdp", "xsk", "netlink", "neighbour",
+    "ring-buffer", "ftrace", "kprobes", "uprobes", "smp", "cpu", "entry", "ksm", "mmap", "vmalloc", "swap", "shmem",
+    "userfaultfd", "binfmt_elf", "coredump", "fsnotify", "inotify", "fanotify", "eventfd", "eventpoll", "super",
+    "kvm", "iommu", "cpufreq", "cpuidle", "pm", "clk", "dma-buf", "driver core", "devres", "firmware_loader",
+}
+ALLGEMEIN = {"core", "client", "server", "common", "display", "host", "main", "generic", "lib", "util", "utils"}
+
+
+def kernbereich(teile):
+    """Kerncode laut Namen in der Beschreibung? ['mm', 'huge_memory'] -> True, ['net', 'mlx5'] -> False"""
+    t = [x.lower() for x in teile]
+    return bool(t) and (t[0] in KERN_ZUERST or t[-1] in KERN_BEREICHE)
+
+
+# Quelldateien, die nicht zum laufenden Kernel gehören (Beispiele, Hilfsprogramme, Dokumentation)
+KEIN_KERNEL = ("Documentation/", "tools/", "samples/", "scripts/")
+KBUILD_URL = "https://raw.githubusercontent.com/torvalds/linux/v{zweig}/{pfad}"
+# Ausweichquellen mit denselben Dateien, falls GitHub abweist (Code 429 bei zu vielen Anfragen)
+KBUILD_ERSATZ = ["https://cdn.jsdelivr.net/gh/torvalds/linux@v{zweig}/{pfad}",
+                 "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/{pfad}?h=v{zweig}"]
+KB_OBJ = r"obj-(?:y|m|\$\((CONFIG_\w+)\)|\$\(subst m,y,\$\((CONFIG_\w+)\)\))"
+KB_KEIN_MODUL = {"obj", "lib", "ccflags", "subdir-ccflags", "asflags", "ldflags", "extra", "hostprogs", "always",
+                 "targets", "clean", "CFLAGS", "AFLAGS", "header", "userprogs", "subdir"}
+
+
+def kbuild_zeilen(text):
+    """Zuweisungen eines Kernel-Makefiles: [(Variable, [Werte])], z. B. ('obj-$(CONFIG_DRM_XE)', ['xe.o'])"""
+    aus = []
+    for z in re.sub(r"\\\n", " ", text).splitlines():
+        m = re.match(r"\s*([\w$(),. -]+?)\s*(?:\+=|:=|=)\s*(.*)", z.split("#")[0])
+        if m:
+            aus.append((m.group(1).strip(), [re.sub(r"\.o\)$", ".o", w) for w in m.group(2).split()]))
+    return aus
+
+
+def kbuild_objekt(zeilen, ziel, gesehen):
+    """Objektdatei im Makefile suchen -> ([CONFIG-Symbole], Modulname) oder None.
+    'xe-y += xe_bo.o' und 'obj-$(CONFIG_DRM_XE) += xe.o' ergeben (['CONFIG_DRM_XE'], 'xe')."""
+    if ziel in gesehen:
+        return None
+    gesehen.add(ziel)
+    for var, werte in zeilen:
+        if ziel not in werte:
+            continue
+        m = re.fullmatch(KB_OBJ, var)
+        if m:
+            sym = m.group(1) or m.group(2)
+            return ([sym] if sym else []), ziel[:-2].split("/")[-1]
+        m = re.fullmatch(r"([\w-]+?)-(?:y|m|objs|\$\((CONFIG_\w+)\))", var)
+        if m and m.group(1) not in KB_KEIN_MODUL:
+            oben = kbuild_objekt(zeilen, m.group(1) + ".o", gesehen)
+            if oben:
+                return ([m.group(2)] if m.group(2) else []) + oben[0], oben[1]
+    return None
+
+
+def kbuild_verzeichnis(verzeichnis, lies):
+    """CONFIG-Symbole, unter denen ein Verzeichnis überhaupt gebaut wird -> Liste oder None (nicht ablesbar)."""
+    symbole, teile, kind = [], verzeichnis.split("/"), ""
+    for i in range(len(teile) - 1, -1, -1):
+        kind = teile[i] + "/" + kind  # ohne Makefile dazwischen: "amd/amdgpu/"
+        text = lies("/".join(teile[:i]))
+        if text is None:
+            continue
+        gefunden = False
+        for var, werte in kbuild_zeilen(text):
+            m = re.fullmatch(KB_OBJ, var)
+            if m and kind in werte:
+                sym = m.group(1) or m.group(2)
+                symbole += [sym] if sym else []
+                gefunden = True
+                break
+        if not gefunden and i > 0 and kind not in text:  # oberste Ebene: nicht genannt = wird immer gebaut
+            return None
+        kind = ""
+    return symbole
+
+
+def kbuild_loese(datei, lies):
+    """Quelldatei -> {'datei', 'symbole', 'modul'} oder None, wenn die Makefiles es nicht eindeutig hergeben.
+    lies(verzeichnis) liefert den Text von Makefile/Kbuild oder None. symbole leer = wird immer fest eingebaut."""
+    if not datei.endswith((".c", ".S", ".rs")):
+        return None
+    teile = datei.split("/")
+    for i in range(len(teile) - 1, 0, -1):
+        verzeichnis = "/".join(teile[:i])
+        text = lies(verzeichnis)
+        if not text:
+            continue
+        zeilen = kbuild_zeilen(text)
+        ziel = re.sub(r"\.(c|S|rs)$", ".o", "/".join(teile[i:]))
+        gefunden = kbuild_objekt(zeilen, ziel, set())
+        if not gefunden and "/" in ziel:  # $(addprefix libxfs/, xfs_attr_leaf.o …)
+            gefunden = kbuild_objekt(zeilen, ziel.split("/")[-1], set())
+        if not gefunden:
+            continue
+        tore = kbuild_verzeichnis(verzeichnis, lies)
+        if tore is None:
+            return None
+        return {"datei": datei, "symbole": list(dict.fromkeys(gefunden[0] + tore)), "modul": gefunden[1]}
+    return None
+
+
+def kbuild_pfade(dateien):
+    """Makefiles, die für diese Quelldateien gebraucht werden."""
+    pfade = {"Kbuild"}
+    for datei in dateien:
+        teile = datei.split("/")
+        for i in range(1, len(teile)):
+            pfade.add("/".join(teile[:i]) + "/Makefile")
+            if i <= 2:
+                pfade.add("/".join(teile[:i]) + "/Kbuild")
+    return sorted(pfade)
+
+
+def kernel_quellen(dateien):
+    """Quelldateien, die über 'betroffen' entscheiden: .c vor Headern, ohne Doku und Hilfsprogramme."""
+    echte = [d for d in dateien if not d.startswith(KEIN_KERNEL)]
+    return [d for d in echte if d.endswith((".c", ".S", ".rs"))] or echte
+
+
+def kernel_stand(installiert, versionen):
+    """Stand laut kernel.org (Angaben im CVE-Datensatz). installiert z. B. '6.12.115'.
+    -> ('nie', ab_version) | ('behoben', fix) | ('offen', Fix im eigenen Zweig oder None) | None (keine Angaben)"""
+    def zahl(v):
+        return re.fullmatch(r"\d+(\.\d+)*", str(v or "")) is not None
+
+    def zweig_von(v):
+        return ".".join(str(v).split(".")[:2])
+
+    zweig = zweig_von(installiert)
+    ab, fixe, bereiche, haupt = [], {}, [], None
+    for v in versionen or []:
+        ver, status = str(v.get("version", "")), v.get("status")
+        lt, le = v.get("lessThan"), v.get("lessThanOrEqual")
+        if not zahl(ver) or ver == "0":
+            continue
+        if status == "affected" and not lt and not le:
+            ab.append(ver)
+        elif status == "affected" and zahl(lt):
+            bereiche.append((ver, str(lt)))
+        elif status == "unaffected" and le == "*":
+            haupt = ver
+        elif status == "unaffected" and str(le).endswith(".*"):
+            fixe[str(le)[:-2]] = ver
+    if not (ab or fixe or bereiche or haupt):
+        return None
+    if bereiche and not ab and zweig not in [zweig_von(x) for b in bereiche for x in b]:
+        return "nie", None  # Fehler steckt nur in den genannten Zweigen (über Backports hineingekommen)
+    for unten, oben in bereiche:  # Fehler kam über einen Backport in diesen Zweig
+        if zweig in (zweig_von(unten), zweig_von(oben)):
+            if vergleiche(installiert, unten) < 0:
+                return "nie", unten
+            return ("offen", oben) if vergleiche(installiert, oben) < 0 else ("behoben", oben)
+    if ab and vergleiche(installiert, min(ab, key=vteile)) < 0:
+        return "nie", min(ab, key=vteile)
+    if zweig in fixe:
+        return ("behoben", fixe[zweig]) if vergleiche(installiert, fixe[zweig]) >= 0 else ("offen", fixe[zweig])
+    if haupt and vergleiche(installiert, haupt) >= 0:
+        return "behoben", haupt
+    return "offen", None
+
+
+def kernel_befehle_exakt(bau):
+    """Prüfbefehle für aufgelöste Quelldateien. Die echo-Zeilen machen die Ausgabe selbsterklärend."""
+    zeilen, symbole, module = ["uname -rv"], [], []
+    for b in bau:
+        if not b["symbole"]:
+            continue
+        zeilen.append(f"echo 'KERNEL-CHECK {b['datei']} {','.join(b['symbole'])} {b['modul'] or '-'}'")
+        symbole += [x[len("CONFIG_"):] for x in b["symbole"] if x[len("CONFIG_"):] not in symbole]
+        if b["modul"] and b["modul"].replace("-", "_") not in module:
+            module.append(b["modul"].replace("-", "_"))
+    zeilen.append(f"grep -E '^(# )?CONFIG_({'|'.join(symbole)})[= ]' /boot/config-$(uname -r)")
+    if module:
+        zeilen.append(f"lsmod | grep -E '^({'|'.join(module)}) ' || echo 'Modul nicht geladen'")
+        # Netzwerk-Module (Alias net-pf-…) lädt der Kernel von selbst, sobald ein Programm sie anspricht
+        zeilen.append(f"grep -E '^alias net-pf-[^ ]+ ({'|'.join(module)})$' /lib/modules/$(uname -r)/modules.alias "
+                      "| head -n3 | sed 's/^alias/AUTOLOAD/'")
+    return "\n".join(zeilen)
 
 
 # ---------------------------------------------------------------- Pakete
@@ -221,10 +447,111 @@ def ports_fuer(name):
     return None
 
 
+def netz_befehl(name):
+    """Welche Prozesse mit offenem Netzwerk-Port gehören zum Paket (IST) oder haben es geladen (NUTZT)?
+    Verglichen werden die Programme und Bibliotheken aller Pakete desselben Quellpakets mit /proc/PID/maps."""
+    return ("Q=$(dpkg-query -W -f='${source:Package}\\n' " + name + " 2>/dev/null | head -n1); "
+            "D=$(dpkg-query -W -f='${binary:Package} ${source:Package}\\n' | awk -v q=\"$Q\" '$2==q{print $1}' | "
+            "xargs -r dpkg -L 2>/dev/null | grep -E '\\.so[.0-9]*$|/s?bin/|/libexec/' | sed 's|.*/||' | sort -u); "
+            "echo \"NETZ-CHECK $Q: $(echo \"$D\" | grep -c .) Dateien\"; "
+            "ss -Hltnup | grep -o 'pid=[0-9]*' | sort -u | cut -d= -f2 | while read p; do n=LAUSCHT; "
+            "[ -n \"$D\" ] && awk '{print $6}' /proc/$p/maps 2>/dev/null | sed 's|.*/||' | grep -qxF \"$D\" "
+            "&& n=LAUSCHT-NUTZT-PAKET; "
+            "[ -n \"$D\" ] && readlink /proc/$p/exe | sed 's|.*/||; s| (deleted)||' | grep -qxF \"$D\" "
+            "&& n=LAUSCHT-IST-PAKET; "
+            "echo \"$n $(cat /proc/$p/comm) $(ss -Hltnup | grep \"pid=$p,\" | awk '{print $1\"/\"$5}' | sort -u | "
+            "tr '\\n' ' ')\"; done; "
+            "echo \"NETZ-ENDE $(ss -Hltnu | wc -l) Sockets, $(ss -Hltnup | grep -vc pid=) ohne Prozess\"")
+
+
 def paket_befehle(name, cve):
-    return (f"zcat /usr/share/doc/{name}/changelog.Debian.gz | grep -c {cve}\n"
+    doc = f"/usr/share/doc/{name}/changelog"
+    return (f"zcat {doc}.Debian.gz {doc}.gz 2>/dev/null | grep -c {cve}\n"
             f"apt-cache rdepends --installed --no-breaks --no-conflicts --no-replaces --no-enhances --no-suggests {name}\n"
-            "ss -ltn")
+            + netz_befehl(name))
+
+
+def lokale_adresse(adresse):
+    """'tcp/127.0.0.1:631' -> True (nur von diesem Rechner aus erreichbar)"""
+    a = adresse.split("/", 1)[-1].rsplit(":", 1)[0]
+    return a.startswith("127.") or a.split("%")[0] in ("[::1]", "::1", "localhost")
+
+
+def kurzlebig(adresse):
+    """UDP-Port aus dem Bereich für ausgehende Verbindungen: Antwort-Port eines Programms, kein Dienst."""
+    port = adresse.rsplit(":", 1)[-1]
+    return adresse.startswith("udp/") and port.isdigit() and int(port) >= 32768
+
+
+def lies_netz(text):
+    """Ausgabe von netz_befehl() -> {'quelle', 'dateien', 'lauscher': [(art, prozess, [adressen])], 'ohne_prozess'}
+    oder None. art: 'IST' (Programm aus dem Paket), 'NUTZT' (hat das Paket geladen), '' (unbeteiligt)."""
+    m = re.search(r"^NETZ-CHECK ?([^:\n]*): (\d+) Dateien", text, re.M)
+    if not m:
+        return None
+    lauscher = []
+    for art, prozess, adressen in re.findall(r"^LAUSCHT(?:-(IST|NUTZT)-PAKET)? (\S+)[ \t]*([^\n]*)", text, re.M):
+        lauscher.append((art, prozess, adressen.split()))
+    ende = re.search(r"^NETZ-ENDE (\d+) Sockets, (\d+) ohne Prozess", text, re.M)
+    return {"quelle": m.group(1).strip(), "dateien": int(m.group(2)), "lauscher": lauscher,
+            "ohne_prozess": int(ende.group(2)) if ende else 0}
+
+
+# Pakete ohne eigene Programme oder Bibliotheken (reiner Python-, Perl-, Ruby-, Node- oder PHP-Code):
+# erreichbar nur über einen Dienst, der in dieser Sprache läuft
+SPRACHEN = [(r"^python3?-", r"python|gunicorn|uwsgi|celery", "Python"), (r"^lib.*-perl$", r"perl|starman", "Perl"),
+            (r"^ruby-", r"ruby|puma|unicorn|passenger", "Ruby"), (r"^node-", r"node|npm", "Node.js"),
+            (r"^php", r"php|apache2", "PHP"), (r"-java$|^lib.*-java$", r"java", "Java")]
+
+
+def sprache_von(paket):
+    return next(((prozess, name) for muster, prozess, name in SPRACHEN if re.search(muster, paket)), (None, None))
+
+
+def netz_lage(netz, paket):
+    """-> ('dienst'|'nutzt'|'frei'|'unklar', von außen erreichbare Prozesse [(prozess, adresse)], Satz)"""
+    def offen(adressen, alle):
+        return [a for a in adressen if not lokale_adresse(a) and (alle or not kurzlebig(a))]
+
+    def aussen(art):
+        return [(p, offen(adr, art == "IST")[0]) for x, p, adr in netz["lauscher"]
+                if x == art and offen(adr, art == "IST")]
+
+    def liste(prozesse):
+        return ", ".join(f"`{p}` ({a})" for p, a in prozesse[:5])
+
+    zahl = len(netz["lauscher"])
+    if netz["ohne_prozess"]:
+        hinweis = (f" Achtung: Bei {netz['ohne_prozess']} offenen Ports war der Prozess nicht sichtbar – den Befehl "
+                   "als root ausführen, sonst ist das Ergebnis unvollständig.")
+    else:
+        hinweis = ""
+    dienst, nutzt = aussen("IST"), aussen("NUTZT")
+    if dienst:
+        return "dienst", dienst, f"Ein Programm aus diesem Paket lauscht von außen erreichbar: {liste(dienst)}." + hinweis
+    if nutzt:
+        return "nutzt", nutzt, ("Von außen erreichbare Dienste haben das Paket geladen: " + liste(nutzt) + ". Ob sie "
+                                "die betroffene Funktion mit fremden Daten aufrufen, lässt sich nicht automatisch sagen."
+                                + hinweis)
+    if netz["dateien"] and not netz["ohne_prozess"]:
+        innen = [p for x, p, adr in netz["lauscher"] if x]
+        return "frei", [], (f"Kein von außen erreichbarer Dienst nutzt das Paket (geprüft: {zahl} Prozesse mit offenem "
+                            "Netzwerk-Port" + (f"; nur lokal lauscht {', '.join(f'`{p}`' for p in innen[:3])}" if innen
+                                               else "") + "). Über offene Ports ist die Lücke damit nicht erreichbar.")
+    prozess, sprache = sprache_von(paket)
+    if not netz["dateien"] and prozess and not netz["ohne_prozess"]:
+        laeufer = [(p, offen(adr, False)[0]) for _, p, adr in netz["lauscher"]
+                   if re.search(prozess, p) and offen(adr, False)]
+        if laeufer:
+            return "nutzt", laeufer, (f"Das Paket ist {sprache}-Code. Von außen erreichbar laufen diese "
+                                      f"{sprache}-Dienste: {liste(laeufer)}. Ob sie das Paket verwenden, lässt sich "
+                                      "nicht automatisch sagen.")
+        return "frei", [], (f"Das Paket ist {sprache}-Code, und kein von außen erreichbarer Dienst läuft mit {sprache} "
+                            f"(geprüft: {zahl} Prozesse mit offenem Netzwerk-Port). Über offene Ports ist die Lücke "
+                            "damit nicht erreichbar.")
+    return "unklar", [], ("Ob ein Dienst mit offenem Netzwerk-Port das Paket nutzt, ließ sich nicht feststellen "
+                          "(das Paket enthält keine Programme oder Bibliotheken, die sich in laufenden Prozessen "
+                          "wiederfinden lassen)." + hinweis)
 
 
 # ---------------------------------------------------------------- Bewertung des JSON
@@ -259,8 +586,14 @@ def bewerte(e):
         "quelle": vul.get("reference", ""), "beschreibung": beschreibung, "gruende": [], "details": [],
     }
     os_ = e.get("host", {}).get("os", {})
-    r["release"] = (DEBIAN_NAMEN.get(str(os_.get("version", "")).split(".")[0])
-                    if str(os_.get("platform", "")).lower() == "debian" else None)
+    plattform = str(os_.get("platform", "")).lower()
+    if plattform == "debian":
+        r["release"] = DEBIAN_NAMEN.get(str(os_.get("version", "")).split(".")[0])
+    else:  # ältere Einträge ohne host.os: Debian-Version aus dem Zusatz "+deb13u1" ablesen
+        m_deb = None if plattform else re.search(r"deb(\d+)", str(r["version"]))
+        r["release"] = DEBIAN_NAMEN.get(m_deb.group(1)) if m_deb else None
+    m_fix = re.fullmatch(r"Package less than (\S+)", str(r["bedingung"]).strip())
+    r["fix_wazuh"] = m_fix.group(1) if m_fix else None
     m_cve = re.match(r"CVE-(\d{4})-", str(r["cve"]))
     m_jetzt = re.match(r"(\d{4})", str(vul.get("detected_at", "")))
     r["alt"] = bool(m_cve and m_jetzt and int(m_jetzt.group(1)) - int(m_cve.group(1)) >= 3)
@@ -274,12 +607,24 @@ def bewerte(e):
         r["typ"] = "kernel"
         teile = kernel_teile(beschreibung)
         r["bereich"] = "/".join(teile) or "–"
-        r["treiber"] = teile[-1] if teile else None
-        arch = teile[0] if teile else ""
-        if arch in ARCHITEKTUREN and r["arch"] in X86:
+        namen = [t for t in teile if t.lower() not in ALLGEMEIN] or teile  # "smb: client:" -> smb
+        r["treiber"] = namen[-1] if namen else None
+        fremd = [t.lower() for t in teile if t.lower() in ARCHITEKTUREN]
+        r["tun_update"] = ("Kernel-Update einspielen, sobald Debian es liefert (`sudo apt update && sudo apt "
+                           "full-upgrade`), danach neu starten.")
+        if fremd and r["arch"] in X86:
             r["ampel"] = "gruen"
             r["gruende"].append(f"Die Lücke steckt im Kernel-Teil `{r['bereich']}`. Diesen Teil gibt es nur für "
-                                f"{ARCHITEKTUREN[arch]}, dieser Rechner ist aber ein PC ({r['arch']}).")
+                                f"{ARCHITEKTUREN[fremd[0]]}, dieser Rechner ist aber ein PC ({r['arch']}).")
+        elif kernbereich(teile):
+            r["ampel"], r["treiber"] = "gelb", None
+            r["kopf"] = "🟡 Betroffen – Kernel-Update einspielen, sobald verfügbar"
+            r["gruende"].append(f"Die Lücke steckt im Kernel-Bereich `{r['bereich']}`. Das ist Kerncode, der in jedem "
+                                "Kernel fest eingebaut ist – einen Treiber, der fehlen könnte, gibt es hier nicht.")
+            r["gruende"].append("Kernel-Lücken dieser Art lassen sich meist nur von jemandem ausnutzen, der schon auf "
+                                "dem Rechner angemeldet ist.")
+            r["tun"] = r["tun_update"]
+            r["ergebnis"] = {"betroffen": "Ja", "angreifbar": "Unklar"}
         elif r["treiber"]:
             r["ampel"] = "gelb"
             r["gruende"].append(f"Die Lücke steckt im Kernel-Treiber `{r['treiber']}` (Bereich `{r['bereich']}`).")
@@ -305,9 +650,14 @@ def bewerte(e):
     teile = namens_teile(name)
     komponente = "ja" if any(t in beschreibung.lower() for t in teile) else "unklar"
 
-    if ver == "nein":
+    if ver == "nein" and komponente == "ja":
         r["ampel"] = "gruen"
         r["gruende"].append(f"Betroffen sind Versionen {regel}. Installiert ist {rein} – das liegt außerhalb.")
+    elif ver == "nein":  # Versionsangabe kann zu einem anderen Bestandteil gehören: kein Grün allein daraus
+        r["ampel"] = "gelb"
+        r["gruende"].append(f"Die Beschreibung nennt Versionen {regel}; installiert ist {rein}, das läge außerhalb. "
+                            f"Sie nennt aber das Paket `{name}` nicht. Die Versionsangabe kann also zu einem anderen "
+                            "Bestandteil gehören und reicht allein nicht für eine Entwarnung.")
     elif ver == "ja":
         r["gruende"].append(f"Betroffen sind Versionen {text_bereich(*bereich)}. Installiert ist {rein} – "
                             "das liegt im betroffenen Bereich.")
@@ -335,7 +685,13 @@ def bewerte(e):
     if r["ampel"] != "gruen":
         r["befehle"] = paket_befehle(name, r["cve"])
         r["lesen"] = ("Zeigt der erste Befehl **0**, ist der Fix nicht eingebaut. Der zweite zeigt, welche "
-                      "Programme das Paket nutzen, der dritte, welche Ports offen sind.")
+                      "Programme das Paket nutzen. Der dritte (als root ausführen) zeigt, ob ein Dienst mit offenem "
+                      "Netzwerk-Port das Paket nutzt: `LAUSCHT-IST-PAKET` = Dienst aus diesem Paket, "
+                      "`LAUSCHT-NUTZT-PAKET` = Dienst hat das Paket geladen, nur `LAUSCHT` = unbeteiligt.")
+        if r["fix_wazuh"] and dpkg_vergleich(r["version"], r["fix_wazuh"]) < 0:
+            r["gruende"].append(f"Wazuh nennt als behobene Version `{r['fix_wazuh']}`; installiert ist die ältere "
+                                f"`{r['version']}`. Ein Update sollte also bereitstehen (`sudo apt update && apt list "
+                                f"--upgradable 2>/dev/null | grep '^{name}/'`).")
         if "tiocsti" in r["beschreibung"].lower():  # entscheidet allein die Kernel-Sperre
             r["gruende"].append("Die Lücke braucht den Terminal-Trick **TIOCSTI** (Zeichen in ein fremdes Terminal "
                                 "schieben) und ist nur lokal ausnutzbar. Neuere Kernel sperren den Trick – der Befehl "
@@ -346,6 +702,8 @@ def bewerte(e):
     r["details"] += [("Bereinigte Version", rein), ("Debian-Zusatz", zusatz or "–"),
                      ("Regel aus der Beschreibung", regel), ("Fix-Version", fix or "–"),
                      ("Paket im Text genannt", "ja" if komponente == "ja" else "nein")]
+    if r["fix_wazuh"]:
+        r["details"].append(("Behoben laut Wazuh ab", r["fix_wazuh"]))
     return r
 
 
@@ -380,10 +738,108 @@ def werte_kernel_aus(r, text):
                             "Rechner ist oder passende Hardware anschließt."],
                 "tun": "Kernel-Update einspielen, sobald Debian es liefert: `sudo apt update && sudo apt full-upgrade`, "
                        "danach neu starten."}
-    grund = (f"Der Treiber `{r['treiber']}` ist in deinem Kernel nicht eingebaut "
-             + (f"(`{treffer[0]}`)." if treffer else "(der Prüfbefehl fand keine Zeile)."))
-    return {"ampel": "gruen", "betroffen": "Nein", "angreifbar": "Nein", "gruende": [grund],
-            "tun": "Nichts. Die Meldung kann in Wazuh ignoriert werden."}
+    if treffer:
+        return {"ampel": "gruen", "betroffen": "Nein", "angreifbar": "Nein",
+                "gruende": [f"Der Treiber `{r['treiber']}` ist in deinem Kernel nicht eingebaut (`{treffer[0]}`)."],
+                "tun": "Nichts. Die Meldung kann in Wazuh ignoriert werden."}
+    return {"ampel": "gelb", "betroffen": "Unklar (vermutlich nein)", "angreifbar": "Nein", "kopf": "🟡 Vermutlich "
+            "nicht betroffen – nicht sicher belegt",
+            "gruende": [f"Der Prüfbefehl fand in der Kernel-Config keine Zeile zu `{r['treiber']}`. Das heißt meist: "
+                        "Der Treiber ist nicht eingebaut.",
+                        "Sicher ist das aber nicht: Der Name stammt aus der Beschreibung und muss nicht der Name in "
+                        "der Kernel-Config sein. Mit Internet-Zugang (Einstellung `ONLINE`) liest die Funktion die "
+                        "betroffenen Quelldateien und prüft genau."],
+            "tun": "Nichts Dringendes. " + (r.get("tun_update") or "Kernel-Updates wie gewohnt einspielen.")}
+
+
+def werte_kernel_exakt(r, text):
+    """Ausgabe von kernel_befehle_exakt(): je Quelldatei steht in der KERNEL-CHECK-Zeile, welche CONFIG-Symbole
+    gesetzt sein müssen und wie das Modul heißt. Die Auswertung braucht deshalb keine Online-Daten."""
+    pruefungen = list(dict.fromkeys(re.findall(r"KERNEL-CHECK (\S+) (CONFIG_[\w,]+) ([\w-]+)", text)))
+    if not pruefungen:
+        return None
+    if re.search(r"/boot/config\S*: (No such file|Datei oder Verzeichnis nicht gefunden)", text):
+        return {"ampel": "gelb", "betroffen": "Unklar", "angreifbar": "Unklar",
+                "gruende": ["Die Kernel-Config (`/boot/config-…`) fehlt auf diesem Rechner, die Prüfung war nicht "
+                            "möglich."], "tun": r.get("tun_update") or "Kernel-Updates wie gewohnt einspielen."}
+    config = {}
+    for sym, wert in re.findall(r"^\s*(?:# )?(CONFIG_\w+)(?:=(\S+)| is not set)", text, re.M):
+        config[sym] = wert or "n"
+    geladen = {z.split()[0] for z in text.splitlines() if re.match(r"\s*[\w-]+\s+\d+\s+\d+", z)}
+    selbst = set(re.findall(r"^AUTOLOAD net-pf-\S+ (\S+)", text, re.M))
+    aus, module, fest, laeuft, bedarf = [], [], [], [], []
+    for datei, symbole, modul in pruefungen:
+        werte = {sym: config.get(sym, "n") for sym in symbole.split(",")}
+        fehlt = [sym for sym, w in werte.items() if w == "n"]
+        if fehlt:
+            aus.append((datei, fehlt[0]))
+        elif "m" in werte.values():
+            name = modul.replace("-", "_")
+            (laeuft if name in geladen or modul == "-" else bedarf if name in selbst else module).append((datei, name))
+        else:
+            fest.append((datei, next(iter(werte))))
+    if bedarf and not fest and not laeuft:
+        namen = list(dict.fromkeys(n for _, n in bedarf))
+        return {"ampel": "gelb", "betroffen": "Ja", "angreifbar": "Nein", "lokal": "Ja",
+                "kopf": "🟡 Betroffen – Modul wird bei Bedarf automatisch geladen",
+                "gruende": ["Der betroffene Teil ist ein Netzwerk-Modul und gerade nicht geladen: "
+                            + ", ".join(f"`{n}`" for n in namen) + ".",
+                            "Der Kernel lädt solche Module aber von selbst, sobald ein Programm den passenden "
+                            "Netzwerk-Typ anspricht – das kann auch ein normal angemeldeter Benutzer auslösen."],
+                "tun": (r.get("tun_update") or "Kernel-Update einspielen, sobald Debian es liefert.") + " Wird das "
+                       "Modul nicht gebraucht, lässt es sich bis dahin sperren: " + " ".join(
+                           f"`echo 'install {n} /bin/false' > /etc/modprobe.d/{n}-sperre.conf`" for n in namen[:2])}
+    if not fest and not laeuft:
+        gruende = []
+        if aus:
+            gruende.append("Der betroffene Kernel-Teil ist in deinem Kernel nicht eingebaut: "
+                           + ", ".join(f"`{d}` (`{sym}` ist nicht gesetzt)" for d, sym in aus[:3]) + ".")
+        if module:
+            gruende.append("Der betroffene Teil ist nur als Modul vorhanden und gerade nicht geladen: "
+                           + ", ".join(f"`{name}`" for name in dict.fromkeys(n for _, n in module)) + ". Solange "
+                           "das Modul nicht geladen wird, ist die Lücke nicht erreichbar. Geladen würde es nur auf "
+                           "passender Hardware bzw. wenn die Funktion genutzt wird.")
+        return {"ampel": "gruen", "betroffen": "Nein", "angreifbar": "Nein", "gruende": gruende,
+                "tun": ("Nichts sofort. Das nächste reguläre Kernel-Update schließt die Lücke ohnehin "
+                        "(`sudo apt update && sudo apt full-upgrade`)." if module
+                        else "Nichts. Die Meldung kann in Wazuh ignoriert werden.")}
+    gruende = []
+    if laeuft:
+        gruende.append("Der betroffene Kernel-Teil ist als Modul geladen: "
+                       + ", ".join(f"`{name}`" if name != "-" else f"`{d}`" for d, name in laeuft[:3]) + ".")
+    if fest:
+        gruende.append("Der betroffene Kernel-Teil ist fest eingebaut: "
+                       + ", ".join(f"`{d}` (`{sym}=y`)" for d, sym in fest[:3]) + ".")
+    gruende.append("Ausnutzen lässt sich so eine Kernel-Lücke meist nur von jemandem, der schon auf dem Rechner ist "
+                   "oder passende Hardware anschließt.")
+    return {"ampel": "gelb", "betroffen": "Ja", "angreifbar": "Nein", "gruende": gruende,
+            "tun": r.get("tun_update") or "Kernel-Update einspielen, sobald Debian es liefert, danach neu starten."}
+
+
+def kernel_nachbessern(r, ergebnis, text):
+    """Folgeantwort Kernel: laufende Version (uname -v) gegen den Debian-Fix, Angriffsweg laut NVD."""
+    fix = (r.get("debian") or {}).get("fix")
+    m = re.search(r"Debian (\d[\w.:~+-]*)", text)
+    laufend = m.group(1) if m else None
+    if ergebnis["betroffen"] == "Nein":
+        return ergebnis
+    if fix and laufend and dpkg_vergleich(laufend, fix) >= 0:
+        return {"ampel": "gruen", "betroffen": "Nein", "angreifbar": "Nein",
+                "gruende": [f"Der laufende Kernel (`{laufend}`) enthält den Fix schon: Debian hat die Lücke in "
+                            f"Version `{fix}` behoben.",
+                            f"Gemeldet wurde das Paket `{r['paket']}` in Version `{r['version']}` – vermutlich ein "
+                            "altes Kernel-Paket, das noch installiert ist."],
+                "tun": "Alte Kernel-Pakete entfernen, dann verschwindet die Meldung: `sudo apt autoremove --purge`."}
+    if fix and laufend and dpkg_vergleich(r["version"], fix) >= 0:
+        ergebnis["gruende"].append(f"Das Paket mit dem Fix (`{fix}`) ist schon installiert, es läuft aber noch der "
+                                   f"alte Kernel `{laufend}`.")
+        ergebnis["tun"] = "Neu starten, damit der neue Kernel läuft."
+    weg = (r.get("nvd") or {}).get("weg")
+    if ergebnis["betroffen"] == "Ja" and weg == "NETWORK":
+        ergebnis.update(ampel="rot", angreifbar="Ja")
+        ergebnis["gruende"] = [g for g in ergebnis["gruende"] if not g.startswith("Ausnutzen lässt sich")]
+        ergebnis["gruende"].append(f"Angriffsweg laut {r['nvd'].get('quelle', 'NVD')}: {nvd_text(r['nvd'])}.")
+    return ergebnis
 
 
 def werte_paket_aus(r, text):
@@ -441,8 +897,16 @@ def werte_paket_aus(r, text):
     gruende = [f"Der Debian-Changelog von `{r['paket']}` erwähnt {r['cve']} nicht. Der Fix ist also nicht eingebaut."]
     tun = (f"Update einspielen, sobald Debian es liefert. Nachsehen mit "
            f"`sudo apt update && apt list --upgradable 2>/dev/null | grep '^{r['paket']}/'`.")
-    ports, dienst = ports_fuer(r["paket"]), None
-    if not ports:
+    netz = lies_netz(text)
+    lage, erreichbar, netz_satz = netz_lage(netz, r["paket"]) if netz else (None, [], "")
+    nur_lokal = lokale_luecke(r.get("beschreibung", "")) or (r.get("nvd") or {}).get("weg") in ("LOCAL", "PHYSICAL")
+    if lage == "dienst" and not nur_lokal:
+        gruende.append(netz_satz)
+        return {"ampel": "rot", "betroffen": "Ja", "angreifbar": "Ja", "gruende": gruende,
+                "tun": tun + " Bis dahin den Dienst nur aus dem eigenen Netz erreichbar machen "
+                             "(Firewall) oder abschalten, wenn er nicht gebraucht wird."}
+    ports, dienst = (None, None) if netz else (ports_fuer(r["paket"]), None)
+    if not ports and not netz:
         ports, dienst = dienst_aus_text(r.get("beschreibung", ""))
     if ports:
         aussen = [o for o in offen if o[1] in ports and not o[2]]
@@ -513,6 +977,14 @@ def werte_paket_aus(r, text):
                        "GUI-Fassung installiert (Paketname mit gtk, gui, motif …), die Meldung neu prüfen."}
     if gui_luecke(beschr):
         gruende.append("Ausnutzbar nur in der **grafischen Fassung** (GUI) – die ist hier installiert.")
+    if netz and erg["angreifbar"] == "Unklar":  # der Netz-Check beantwortet „von außen erreichbar?“ direkt
+        gruende.append(netz_satz)
+        if lage == "frei":
+            erg["angreifbar"] = "Nein"
+            gruende.append("Ein Risiko bleibt nur, wenn ein Programm auf diesem Rechner mit dem Paket selbst Daten "
+                           "aus fremder Quelle verarbeitet (Dateien, Antworten aus dem Internet).")
+        elif lage == "nutzt":
+            erg["angreifbar"] = "Möglich"
     bibliotheken = [n for n in nutzer if re.search(r"^lib|-libs?$|^zlib|lib\d", n)]
     if nutzer and len(bibliotheken) == len(nutzer):
         satz = f"`{r['paket']}` wird nur von Bibliotheken genutzt (" + ", ".join(f"`{n}`" for n in nutzer[:6]) + ")."
@@ -531,8 +1003,10 @@ def werte_paket_aus(r, text):
                                        f"--no-enhances --no-suggests {n}" for n in bibliotheken[:3])
             erg["befehle_text"] = "Zum Weiterprüfen (Ausgabe gern hier einfügen):"
     else:
-        gruende.append("Kein installiertes Programm hängt von diesem Paket ab.")
-        erg["angreifbar"] = "Nein"
+        if "Reverse Depends:" in text or not netz:
+            gruende.append("Kein installiertes Programm hängt von diesem Paket ab.")
+        if not netz:
+            erg["angreifbar"] = "Nein"
     return erg
 
 
@@ -586,6 +1060,7 @@ def werte_tiocsti_aus(text, ergebnis):
 KOPF_A = {"gruen": "🟢 Kein Handlungsbedarf", "gelb": "🟡 Unklar – bitte prüfen", "rot": "🔴 Handlungsbedarf"}
 KOPF_B = {"gruen": "🟢 Kein Problem", "gelb": "🟡 Betroffen, aber derzeit nicht angreifbar",
           "gelb_unklar": "🟡 Betroffen – Risiko hängt von den nutzenden Programmen ab",
+          "gelb_moeglich": "🟡 Betroffen – ein von außen erreichbarer Dienst nutzt das Paket",
           "rot": "🔴 Problem bestätigt"}
 
 
@@ -651,7 +1126,11 @@ def antwort_a(r, worum):
     if worum:
         t += [f"**Worum geht's:** {worum}", ""]
     t += ["**Warum diese Einstufung:**"] + [f"- {g}" for g in r["gruende"]] + [""]
-    if r.get("befehle"):
+    if r.get("befehle") and r.get("tun"):
+        t += [f"**Was tun:** {r['tun']}", "",
+              f"**Optional genauer prüfen:** Diese Befehle auf **{r['host']}** ausführen und die komplette Ausgabe "
+              "hier einfügen:", "", "```bash", r["befehle"], "```", "", f"**So liest du das Ergebnis:** {r['lesen']}"]
+    elif r.get("befehle"):
         t += [f"**Was tun:** Diese Befehle auf **{r['host']}** ausführen und die komplette Ausgabe hier einfügen:",
               "", "```bash", r["befehle"], "```", "", f"**So liest du das Ergebnis:** {r['lesen']}"]
     elif r.get("tun"):
@@ -684,6 +1163,8 @@ def lokal_wert(r, e):
         return e["lokal"]
     if e["betroffen"] == "Nein":
         return "Nein"
+    if e["betroffen"].startswith("Unklar (vermutlich nein"):
+        return "Unklar"
     nvd = r.get("nvd") or {}
     if nvd.get("weg") == "PHYSICAL":
         return "Nur mit Zugriff am Gerät"
@@ -700,8 +1181,12 @@ def lokal_wert(r, e):
 
 
 def antwort_b(r, e):
-    if e["betroffen"] == "Unklar":
-        kopf = "🟡 Noch unklar – Debian-Tracker ansehen"
+    if e.get("kopf"):
+        kopf = e["kopf"]
+    elif e["betroffen"] == "Unklar":
+        kopf = "🟡 Noch unklar – Debian-Tracker ansehen" if r["typ"] == "paket" else "🟡 Noch unklar"
+    elif e["ampel"] == "gelb" and e["angreifbar"] == "Möglich":
+        kopf = KOPF_B["gelb_moeglich"]
     elif e["ampel"] == "gelb" and e["angreifbar"] == "Unklar":
         kopf = KOPF_B["gelb_unklar"]
     else:
@@ -715,13 +1200,15 @@ def antwort_b(r, e):
     return "\n".join(t)
 
 
-# ---------------------------------------------------------------- Online-Daten (NVD, Debian-Tracker)
+# ---------------------------------------------------------------- Online-Daten (NVD, Debian-Tracker, CVE.org)
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId="
 TRACKER_URL = "https://security-tracker.debian.org/tracker/"
+CVEORG_URL = "https://cveawg.mitre.org/api/cve/"
 DEBIAN_NAMEN = {"10": "buster", "11": "bullseye", "12": "bookworm", "13": "trixie", "14": "forky"}
 
 ONLINE_FRIST = 8  # Sekunden für alle Online-Abfragen zusammen, danach ohne sie weiter
+KBUILD_FRIST = 5  # Sekunden für die Kernel-Makefiles (zweite Runde, nur bei Kernel-Meldungen)
 ONLINE_PAUSE = 300  # nach einem Fehlschlag so lange nicht erneut fragen (Sekunden)
 HTTP_CODES = {
     200: "erreichbar, alles in Ordnung",
@@ -820,8 +1307,49 @@ def lies_nvd(daten):
             weg = d.get("attackVector") or d.get("accessVector")
             if weg:
                 return {"weg": weg.upper(), "rechte": str(d.get("privilegesRequired", "")).upper(),
-                        "interaktion": str(d.get("userInteraction", "")).upper()}
+                        "interaktion": str(d.get("userInteraction", "")).upper(), "quelle": "NVD"}
     return {}
+
+
+def vektor_aus_text(vektor):
+    """'CVSS:3.1/AV:N/AC:L/PR:N/UI:R/…' -> {'weg': 'NETWORK', 'rechte': 'NONE', 'interaktion': 'REQUIRED'}"""
+    teile = dict(t.split(":", 1) for t in str(vektor).split("/") if ":" in t)
+    weg = {"N": "NETWORK", "A": "ADJACENT_NETWORK", "L": "LOCAL", "P": "PHYSICAL"}.get(teile.get("AV"))
+    if not weg:
+        return {}
+    return {"weg": weg, "rechte": {"N": "NONE", "L": "LOW", "H": "HIGH"}.get(teile.get("PR"), ""),
+            "interaktion": {"N": "NONE", "R": "REQUIRED", "P": "REQUIRED", "A": "REQUIRED"}.get(teile.get("UI"), ""),
+            "quelle": "CVE.org"}
+
+
+def lies_cveorg(daten):
+    """CVE-Datensatz von cve.org -> {'vektor', 'ausnutzung', 'dateien', 'versionen'}; {} = nichts Lesbares.
+    vektor: CVSS vom Herausgeber der CVE, sonst von CISA. ausnutzung: 'none' | 'poc' | 'active' (CISA).
+    dateien/versionen: betroffene Quelldateien und Versionsangaben (liefert kernel.org für jede Kernel-CVE)."""
+    try:
+        behaelter = daten["containers"]
+        cna = behaelter.get("cna") or {}
+    except (KeyError, TypeError, AttributeError):
+        return {}
+    aus = {"vektor": {}, "ausnutzung": "", "dateien": [], "versionen": []}
+    for teil in [cna] + list(behaelter.get("adp") or []):
+        for m in teil.get("metrics") or []:
+            for k, v in m.items():
+                if k.startswith("cvssV") and isinstance(v, dict) and not aus["vektor"]:
+                    aus["vektor"] = vektor_aus_text(v.get("vectorString", ""))
+            andere = m.get("other") or {}
+            if andere.get("type") == "ssvc":
+                for option in (andere.get("content") or {}).get("options") or []:
+                    aus["ausnutzung"] = aus["ausnutzung"] or str(option.get("Exploitation", "")).lower()
+    for a in cna.get("affected") or []:
+        aus["dateien"] += [f for f in a.get("programFiles") or [] if f not in aus["dateien"]]
+        if str(a.get("product", "")).lower() == "linux":
+            aus["versionen"] += a.get("versions") or []
+    return aus
+
+
+AUSNUTZUNG = {"none": "keine bekannt", "poc": "Machbarkeitsnachweis (PoC) öffentlich",
+              "active": "wird aktiv ausgenutzt"}
 
 
 NVD_WEG = {"NETWORK": "über das Netzwerk", "ADJACENT_NETWORK": "nur aus dem lokalen Netz",
@@ -904,14 +1432,111 @@ def debian_text(deb):
 def wende_online_an(r):
     """NVD und Debian-Tracker in die erste Bewertung einrechnen. Ohne Daten bleibt alles, wie es ist."""
     nvd, deb = r.get("nvd") or {}, r.get("debian") or {}
+    quelle_weg = nvd.get("quelle", "NVD")
     if nvd:
-        r["details"].append(("Angriffsweg (NVD)", nvd_text(nvd)))
+        r["details"].append((f"Angriffsweg ({quelle_weg})", nvd_text(nvd)))
     if deb:
         r["details"].append((f"Debian-Tracker ({deb['release']})", debian_text(deb)))
+    if r.get("ausnutzung") in AUSNUTZUNG:
+        r["details"].append(("Bekannte Ausnutzung (CISA)", AUSNUTZUNG[r["ausnutzung"]]))
     if r.get("online_info"):
         r["details"].append(("Online-Abfrage", r["online_info"]))
-    if r.get("typ") != "paket" or not deb:
+    if r.get("typ") == "kernel":
+        r = wende_online_kernel(r, nvd, deb)
+    elif deb:
+        r = wende_online_paket(r, nvd, deb)
+    if r.get("ausnutzung") == "active" and r["ampel"] != "gruen":
+        r["gruende"].append("**Die Lücke wird laut CISA bereits aktiv ausgenutzt** – das Update nicht aufschieben.")
+    return r
+
+
+def wende_online_kernel(r, nvd, deb):
+    """Kernel: Debian-Tracker, Versionsangaben von kernel.org und die Bau-Regeln zu den betroffenen Quelldateien."""
+    inst, rein = r["version"], bereinige_version(r["version"])[0]
+    weg = nvd.get("weg", "")
+    nvd_grund = [f"Angriffsweg laut {nvd.get('quelle', 'NVD')}: {nvd_text(nvd)}."] if weg else []
+    angreifbar = "Ja" if weg == "NETWORK" else "Nein" if weg in ("LOCAL", "PHYSICAL") else "Unklar"
+    dateien = r.get("dateien") or []
+    quellen = kernel_quellen(dateien)
+    if dateien:
+        r["details"].append(("Betroffene Quelldateien", ", ".join(dateien[:4]) + (" …" if len(dateien) > 4 else "")))
+
+    def fertig(ampel, kopf, grund, tun, betroffen, angr):
+        r.update(ampel=ampel, kopf=kopf, tun=tun, befehle=None, gruende=[grund] + nvd_grund,
+                 ergebnis={"betroffen": betroffen, "angreifbar": angr})
         return r
+
+    def gruen(grund):
+        return fertig("gruen", None, grund, None, "Nein", "Nein")
+
+    fremd = sorted({d.split("/")[1] for d in quellen if d.startswith("arch/") and d.count("/") > 1} - {"x86"})
+    if quellen and r["arch"] in X86 and all(d.startswith("arch/") and not d.startswith("arch/x86/") for d in quellen):
+        return gruen(f"Die Lücke steckt in `{quellen[0]}`. Dieser Kernel-Teil ist nur für "
+                     f"{ARCHITEKTUREN.get(fremd[0], fremd[0]) if fremd else 'andere Rechner-Arten'} gedacht, dieser "
+                     f"Rechner ist aber ein PC ({r['arch']}).")
+    if dateien and not quellen:
+        return gruen(f"Die Lücke steckt nur in Hilfsdateien des Kernel-Quelltexts (`{dateien[0]}`), nicht im "
+                     "laufenden Kernel.")
+    fix = deb.get("fix") if deb else None
+    if deb and deb["status"] == "not-affected":
+        return gruen(f"Laut Debian-Tracker ist der Kernel von {deb['release']} von dieser Lücke **nicht betroffen**.")
+    if fix and dpkg_vergleich(inst, fix) >= 0:
+        return gruen(f"Debian hat die Lücke in Kernel-Version `{fix}` behoben. Installiert ist `{inst}` – der Fix ist "
+                     "drin. Falls seit dem letzten Kernel-Update nicht neu gestartet wurde: neu starten "
+                     "(`uname -v` zeigt die laufende Version).")
+    stand = r.get("kstand")
+    if stand and stand[0] == "nie":
+        return gruen("Laut kernel.org kam der Fehler erst " + (f"mit Kernel **{stand[1]}** in den Kernel"
+                     if stand[1] else "über spätere Änderungen in andere Kernel-Zweige") + f". Installiert ist der "
+                     f"ältere Zweig {rein} – der fehlerhafte Code ist dort nicht enthalten.")
+    if stand and stand[0] == "behoben":
+        return gruen(f"Laut kernel.org ist die Lücke seit Kernel **{stand[1]}** behoben. Installiert ist {rein} – "
+                     "der Fix ist drin.")
+    if fix:
+        r["tun_update"] = (f"Kernel-Update einspielen – Debian liefert den Fix in Version `{fix}` (`sudo apt update "
+                           "&& sudo apt full-upgrade`), danach neu starten.")
+        offen = f"Debian hat den Fix in Kernel-Version `{fix}` geliefert, installiert ist noch `{inst}`."
+    else:
+        offen = (f"Für {deb['release']} gibt es noch **kein Kernel-Update** mit dem Fix." if deb else
+                 "Kernel-Meldungen nennen keine Versionen; ob es schon ein Update gibt, zeigt der Debian-Tracker.")
+        if stand and stand[1]:
+            offen += f" Bei kernel.org ist er für diesen Zweig seit Version {stand[1]} enthalten."
+    bau = r.get("bau")
+    if bau and all(not b["symbole"] for b in bau):  # Kerncode: in jedem Kernel fest eingebaut, nichts zu prüfen
+        kopf = (("🔴" if weg == "NETWORK" else "🟡") + " Kernel-Update verfügbar – bitte einspielen" if fix
+                else "🟡 Betroffen – Kernel-Update einspielen, sobald verfügbar")
+        fertig("rot" if fix and weg == "NETWORK" else "gelb", kopf,
+               f"Die Lücke steckt in `{bau[0]['datei']}`. Das ist Kerncode, der in jedem Kernel fest eingebaut ist.",
+               r["tun_update"], "Ja", angreifbar)
+        r["gruende"].insert(1, offen)
+        return r
+    if bau:
+        r.update(kopf=None, tun=None, ergebnis=None)  # eine Einstufung nur nach dem Namen gilt nicht mehr
+        r["befehle"] = kernel_befehle_exakt(bau)
+        r["lesen"] = ("Die `grep`-Zeile zeigt, ob der betroffene Teil in deinem Kernel steckt: fehlt die Zeile oder "
+                      "steht dort „is not set“, ist er nicht eingebaut – dann kein Problem. `=m` heißt: als Modul "
+                      "vorhanden; die letzte Zeile zeigt, ob es geladen ist. `=y` heißt: fest eingebaut.")
+        teile = sorted({b["modul"] or b["datei"] for b in bau if b["symbole"]})
+        r["gruende"] = [f"Die Lücke steckt in `{quellen[0]}`" + (f" und {len(quellen) - 1} weiteren Dateien"
+                        if len(quellen) > 1 else "") + ". Laut den Bau-Regeln des Kernels gehört das zu: "
+                        + ", ".join(f"`{t}`" for t in teile[:4]) + ".", offen,
+                        "Ob dieser Teil in deinem Kernel eingebaut und geladen ist, zeigen die Befehle unten – "
+                        "geprüft wird genau das Config-Symbol aus den Bau-Regeln."] + nvd_grund
+        r["details"].append(("Kernel-Config-Symbole", ", ".join(dict.fromkeys(x for b in bau for x in b["symbole"]))))
+    else:
+        r["gruende"] = r["gruende"][:2] + [offen] + nvd_grund
+        if r.get("bau_info"):
+            r["details"].append(("Bau-Regeln des Kernels", r["bau_info"]))
+        if r.get("ergebnis"):  # Kernbereich laut Beschreibung: Angriffsweg nachtragen
+            r["ergebnis"]["angreifbar"] = angreifbar
+    if fix:
+        r["kopf"] = ("🔴" if weg == "NETWORK" else "🟡") + " Kernel-Update verfügbar – bitte einspielen"
+        r["tun"] = r["tun_update"]
+    return r
+
+
+def wende_online_paket(r, nvd, deb):
+    quelle_weg = nvd.get("quelle", "NVD")
     r["alt"] = False  # der Tracker ist schon gelesen, „im Tracker nachsehen“ entfällt
     quelle = deb.get("quellpaket")
     quell_grund = []
@@ -921,7 +1546,7 @@ def wende_online_an(r):
         quell_grund = [herkunft + f"Meldet Wazuh {r['cve']} für weitere Pakete aus `{quelle}`, gilt dieselbe "
                        "Bewertung – die müssen nicht einzeln geprüft werden."]
     weg = nvd.get("weg", "")
-    nvd_grund = [f"Angriffsweg laut NVD: {nvd_text(nvd)}."] if weg else []
+    nvd_grund = [f"Angriffsweg laut {quelle_weg}: {nvd_text(nvd)}."] if weg else []
     angreifbar = "Ja" if weg == "NETWORK" else "Nein" if weg in ("LOCAL", "PHYSICAL") else "Unklar"
 
     def fertig(ampel, kopf, grund, tun, betroffen, angr):
@@ -976,7 +1601,8 @@ def nvd_nachbessern(r, ergebnis):
     weg = (r.get("nvd") or {}).get("weg")
     if ergebnis["betroffen"] != "Nein" and weg in ("LOCAL", "PHYSICAL") and ergebnis["angreifbar"] != "Nein":
         ergebnis["angreifbar"] = "Nein"
-        ergebnis["gruende"].append(f"Angriffsweg laut NVD: {nvd_text(r['nvd'])} – nicht über das Netz.")
+        ergebnis["gruende"].append(f"Angriffsweg laut {r['nvd'].get('quelle', 'NVD')}: {nvd_text(r['nvd'])} – "
+                                   "nicht über das Netz.")
     return ergebnis
 
 
@@ -1020,7 +1646,8 @@ class Pipe:
         LLM_KEY: str = Field(default="", description="API-Key, falls der Server einen verlangt")
         LLM_MODELL: str = Field(default="", description="Modellname, z. B. qwen3.5-9b oder llama3.1:8b")
         WORUM_SATZ: bool = Field(default=True, description="Satz 'Worum geht's' vom Sprachmodell schreiben lassen")
-        ONLINE: bool = Field(default=True, description="NVD (Angriffsweg) und Debian-Tracker (Fix-Stand) abfragen. "
+        ONLINE: bool = Field(default=True, description="NVD und CVE.org (Angriffsweg), Debian-Tracker (Fix-Stand) "
+                             "und bei Kernel-Meldungen die Bau-Regeln des Kernels (GitHub) abfragen. "
                              "Braucht Internet im Open-WebUI-Container; ohne gelten nur die festen Regeln. "
                              "Prüfen: im Chat 'Verbindungstest' schreiben")
         NVD_KEY: str = Field(default="", description="Optionaler NVD-API-Key (mehr Anfragen pro Minute), "
@@ -1029,7 +1656,8 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self._zuletzt = ""  # zuletzt erreichbare LLM-Adresse, wird zuerst probiert
-        self._online = {}  # CVE -> (NVD-Daten, Tracker-Seite), nur erfolgreiche Abfragen
+        self._online = {}  # CVE -> (NVD-Daten, Tracker-Seite, CVE.org-Daten), nur erfolgreiche Abfragen
+        self._kbuild = {}  # (Kernel-Zweig, Pfad) -> Makefile-Text oder None (gibt es nicht)
         self._pause_bis = 0  # bis dahin keine Online-Abfrage (letzte hatte keine Verbindung)
 
     def llm_adressen(self):
@@ -1090,14 +1718,14 @@ class Pipe:
         except Exception:
             return 0, ""
 
-    def hole_alle(self, auftraege):
+    def hole_alle(self, auftraege, frist=None):
         """{name: (url, kopf)} parallel holen, zusammen höchstens ONLINE_FRIST Sekunden -> {name: (code, text)}.
         Hängt eine Abfrage (z. B. DNS ohne Antwort), läuft sie im Hintergrund aus, die Antwort kommt trotzdem."""
         if not auftraege:
             return {}
-        pool = ThreadPoolExecutor(max_workers=len(auftraege))
+        pool = ThreadPoolExecutor(max_workers=min(len(auftraege), 16))
         jobs = {name: pool.submit(self.hole, url, kopf) for name, (url, kopf) in auftraege.items()}
-        wait(list(jobs.values()), timeout=ONLINE_FRIST)
+        wait(list(jobs.values()), timeout=frist or ONLINE_FRIST)
         pool.shutdown(wait=False)
         return {name: (j.result() if j.done() else (0, "")) for name, j in jobs.items()}
 
@@ -1108,12 +1736,14 @@ class Pipe:
         """NVD und Debian-Tracker abfragen und ins Ergebnis schreiben (r["nvd"], r["debian"], r["online_info"])."""
         if not self.valves.ONLINE or not re.fullmatch(r"CVE-\d{4}-\d+", str(r["cve"])):
             return r
-        nvd_daten, seite = self._online.get(r["cve"], (None, None))
+        nvd_daten, seite, cveorg = self._online.get(r["cve"], (None, None, None))
         auftraege = {}
         if nvd_daten is None:
             auftraege["nvd"] = (NVD_URL + r["cve"], self.nvd_kopf())
         if seite is None and r.get("release"):
             auftraege["deb"] = (TRACKER_URL + r["cve"], {})
+        if cveorg is None:
+            auftraege["cveorg"] = (CVEORG_URL + r["cve"], {})
         if auftraege and time.time() < self._pause_bis:
             r["online_info"] = "Online-Abfrage pausiert, weil die letzte keine Verbindung bekam – Bewertung nur " \
                                "nach den festen Regeln. Prüfen: im Chat „Verbindungstest“ schreiben."
@@ -1135,18 +1765,69 @@ class Pipe:
             seite = text if code == 200 else None
             if seite is None:
                 fehler.append("Debian-Tracker: " + code_text(code))
-        if nvd_daten is not None and (seite is not None or not r.get("release")):
+        if "cveorg" in geholt:
+            code, text = geholt["cveorg"]
+            try:
+                cveorg = json.loads(text) if code == 200 else None
+            except ValueError:
+                cveorg = None
+            if cveorg is None and code != 404:
+                fehler.append("CVE.org: " + code_text(code))
+        if nvd_daten is not None and cveorg is not None and (seite is not None or not r.get("release")):
             if len(self._online) > 500:
                 self._online.clear()
-            self._online[r["cve"]] = (nvd_daten, seite)
-        r["nvd"] = lies_nvd(nvd_daten) if nvd_daten else {}
+            self._online[r["cve"]] = (nvd_daten, seite, cveorg)
+        org = lies_cveorg(cveorg) if cveorg else {}
+        r["nvd"] = (lies_nvd(nvd_daten) if nvd_daten else {}) or org.get("vektor") or {}
         r["debian"] = lies_tracker(seite, r["release"], r["paket"]) if seite else {}
-        if nvd_daten and not r["nvd"]:
-            fehler.append("NVD: noch keine Bewertung für diese CVE")
+        r["ausnutzung"] = org.get("ausnutzung", "")
+        hinweis = " – Bewertung nur nach den festen Regeln. Prüfen: im Chat „Verbindungstest“ schreiben."
+        if nvd_daten and not r["nvd"] and not fehler:
+            fehler.append("NVD und CVE.org haben den Angriffsweg dieser CVE noch nicht bewertet")
+            hinweis = ""
+        if r["typ"] == "kernel" and org:
+            r["dateien"] = org.get("dateien") or []
+            r["kstand"] = kernel_stand(bereinige_version(r["version"])[0], org.get("versionen"))
+            r["bau"], r["bau_info"] = self.kernel_bau(r)
+            hinweis = hinweis and (" – soweit möglich mit den übrigen Quellen bewertet. Prüfen: im Chat "
+                                   "„Verbindungstest“ schreiben.")
         if fehler:
-            r["online_info"] = " · ".join(fehler) + " – Bewertung nur nach den festen Regeln. Prüfen: im Chat " \
-                                                    "„Verbindungstest“ schreiben."
+            r["online_info"] = " · ".join(fehler) + hinweis
         return r
+
+    def kernel_bau(self, r):
+        """Betroffene Quelldateien über die Makefiles des Kernels auflösen -> (Liste aus kbuild_loese, Hinweis).
+        Liste None = nicht auflösbar, dann gelten die Namen aus der Beschreibung."""
+        quellen = [d for d in kernel_quellen(r.get("dateien") or []) if d.endswith((".c", ".S", ".rs"))][:4]
+        zweig = ".".join(bereinige_version(r["version"])[0].split(".")[:2])
+        if not quellen or not re.fullmatch(r"\d+\.\d+", zweig):
+            return None, ""
+        if all(d.startswith("arch/") and not d.startswith("arch/x86/") for d in quellen) and r["arch"] in X86:
+            return None, ""  # fremde Architektur: entscheidet schon der Dateipfad
+        if len(self._kbuild) > 3000:
+            self._kbuild.clear()
+        gestoert = []
+        for quelle in [KBUILD_URL] + KBUILD_ERSATZ:  # was eine Quelle nicht liefert, bei der nächsten holen
+            fehlend = [p for p in kbuild_pfade(quellen) if (zweig, p) not in self._kbuild]
+            if not fehlend:
+                break
+            geholt = self.hole_alle({p: (quelle.format(zweig=zweig, pfad=p), {}) for p in fehlend}, KBUILD_FRIST)
+            for pfad, (code, text) in geholt.items():
+                if code in (200, 404):
+                    self._kbuild[(zweig, pfad)] = text if code == 200 else None
+            gestoert += [code for code, _ in geholt.values() if code not in (200, 404)]
+        if any((zweig, p) not in self._kbuild for p in kbuild_pfade(quellen)):
+            return None, "Kernel-Makefiles nicht abrufbar (GitHub, jsDelivr, kernel.org): " + code_text(gestoert[0])
+
+        def lies(verzeichnis):
+            vorn = verzeichnis + "/" if verzeichnis else ""
+            texte = [self._kbuild.get((zweig, vorn + n)) for n in ("Makefile", "Kbuild")]
+            return "\n".join(t for t in texte if t) or None
+
+        bau = [kbuild_loese(d, lies) for d in quellen]
+        if any(b is None for b in bau):
+            return None, "aus den Makefiles nicht eindeutig ablesbar – geprüft wird der Name aus der Beschreibung"
+        return bau, ""
 
     def mit_online(self, r):
         """Online-Daten anwenden; jeder Fehler darin fällt auf die festen Regeln zurück."""
@@ -1164,7 +1845,10 @@ class Pipe:
         else:
             self._pause_bis = 0
             geholt = self.hole_alle({"NVD (Angriffsweg)": (NVD_URL + "CVE-2021-44228", self.nvd_kopf()),
-                                     "Debian-Tracker (Fix-Stand)": (TRACKER_URL + "CVE-2021-44228", {})})
+                                     "Debian-Tracker (Fix-Stand)": (TRACKER_URL + "CVE-2021-44228", {}),
+                                     "CVE.org (Angriffsweg, Kernel-Dateien)": (CVEORG_URL + "CVE-2021-44228", {}),
+                                     "GitHub (Bau-Regeln des Kernels)": (KBUILD_URL.format(zweig="6.12",
+                                                                                           pfad="Kbuild"), {})})
             for name, (code, _) in geholt.items():
                 t.append(f"| {name} | {'✅' if code == 200 else '❌'} {code_text(code)} |")
         for adresse in self.llm_adressen():
@@ -1224,8 +1908,15 @@ class Pipe:
         sb = re.search(r"secureboot (enabled|disabled)", letzte.lower())
         if sb and "secure boot" in r["beschreibung"].lower():
             return antwort_b(r, werte_secureboot_aus(sb.group(1) == "enabled"))
-        if r["typ"] == "kernel" and r.get("treiber"):
-            ergebnis = werte_kernel_aus(r, letzte)
+        if r["typ"] == "kernel":
+            ergebnis = werte_kernel_exakt(r, letzte)
+            if not ergebnis and r["ampel"] == "gruen":  # schon ohne Befehle entschieden (z. B. fremde Architektur)
+                ergebnis = {"ampel": "gruen", "betroffen": "Nein", "angreifbar": "Nein", "gruende": r["gruende"],
+                            "tun": "Nichts. Die Meldung kann in Wazuh ignoriert werden."}
+            elif not ergebnis and r.get("treiber"):
+                ergebnis = werte_kernel_aus(r, letzte)
+            if ergebnis:
+                ergebnis = kernel_nachbessern(r, ergebnis, letzte)
         elif r["typ"] == "paket":
             ergebnis = werte_paket_aus(r, letzte)
         else:

@@ -25,10 +25,10 @@ Wazuh reports lots of "Package default status" findings on Debian that are not r
 
 What it checks:
 - Version ranges from the description ("before", "through", "X to before Y", "from X until Y", lists, "fixed in"), Debian epochs, `+really` versions, Debian backport suffixes (never 🔴 while a backport is possible)
-- Kernel findings: extracts the driver ("drm/xe:" → xe), foreign architectures (s390, arm …) → 🟢, checks kernel config and `lsmod` (module present but not loaded → 🟢)
-- After pasting the output: Debian changelog, listening ports of known services, local-only and client-side bugs, Secure Boot (`mokutil`), libraries → programs using them, old CVEs → Debian tracker
+- Kernel findings (since 2.0, data-driven): affected source files and version ranges from kernel.org (via CVE.org), then the kernel Makefiles map the file to the exact config symbol and module (`drivers/gpu/drm/xe/xe_bo.c` → `CONFIG_DRM_XE` → module `xe`). The check command greps exactly that symbol and module. Foreign architecture, bug introduced in a newer kernel, or fix already installed → 🟢 right away; module present but not loaded → 🟢; auto-loadable network modules → 🟡
+- After pasting the output: Debian changelog and a generic network check – which processes with a listening socket belong to the package or have its libraries mapped (`/proc/PID/maps`, no hard-coded port list). Plus local-only and client-side bugs, Secure Boot (`mokutil`), programs using a library
 
-Settings (valves): `LLM_URL` (any OpenAI-compatible API: llama.cpp, Ollama, vLLM, OpenAI), `LLM_KEY`, `LLM_MODELL`, `WORUM_SATZ` (off = no LLM at all), `ONLINE` (query NVD for the attack vector and the Debian security tracker for the fix status; needs internet access from the Open WebUI container — type `Verbindungstest` in the chat to check), `NVD_KEY` (optional).
+Settings (valves): `LLM_URL` (any OpenAI-compatible API: llama.cpp, Ollama, vLLM, OpenAI), `LLM_KEY`, `LLM_MODELL`, `WORUM_SATZ` (off = no LLM at all), `ONLINE` (query NVD and CVE.org for the attack vector, the Debian security tracker for the fix status and, for kernel findings, the kernel Makefiles on GitHub; needs internet access from the Open WebUI container — type `Verbindungstest` in the chat to check), `NVD_KEY` (optional).
 
 Tested setup: RTX 3060 Ti 8 GB, Ryzen 7 3700X, 32 GB RAM, Debian 13, llama.cpp `llama-server` with Qwen3.5-9B (Unsloth UD-Q4_K_XL, fully on GPU), Open WebUI 0.13.0, Wazuh 4.14.10 – about 1 second per answer. Any small model (3–4B, even CPU-only) is enough for the single sentence; the verdict itself needs no LLM. For comparison: as a pure system prompt the same 9B model with thinking took ~35 s per finding and was still not always right.
 

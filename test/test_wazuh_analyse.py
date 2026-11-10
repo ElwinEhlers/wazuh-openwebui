@@ -76,7 +76,9 @@ pruefe("Kernel-Teile", w.kernel_teile("resolved:  net: sched: sch_cake: fix") ==
 k = {"treiber": "mxc", "paket": "linux-image-amd64", "cve": "X"}
 u = "6.12.115+deb13.1-amd64\n"
 pruefe("kernel =m geladen", w.werte_kernel_aus(k, u + "CONFIG_GPIO_MXC=m\nmxc_gpio  16384  0\n")["ampel"] == "gelb")
-pruefe("kernel nur MXC4005", w.werte_kernel_aus(k, u + "CONFIG_MXC4005=m\nModul nicht geladen")["ampel"] == "gruen")
+e = w.werte_kernel_aus(k, u + "CONFIG_MXC4005=m\nModul nicht geladen")  # Name geraten, keine Zeile: kein Grün
+pruefe("kernel nur MXC4005: nicht belegt", e["ampel"] == "gelb" and "Vermutlich" in e["kopf"], e["kopf"])
+pruefe("kernel is not set -> grün", w.werte_kernel_aus(k, u + "# CONFIG_GPIO_MXC is not set")["ampel"] == "gruen")
 pruefe("kernel Unsinn", w.werte_kernel_aus(k, "wie geht das?") is None)
 xe = {"treiber": "xe", "paket": "linux-image-amd64", "cve": "X"}
 pruefe("kernel Unteroption =y ignoriert",
@@ -127,9 +129,31 @@ for name, soll in LOKAL.items():
 ONLINE = os.path.join(HIER, "online")
 
 
+# Kernel-Makefiles (GitHub), nachgebaut mit den Zeilen, auf die es ankommt
+MAKEFILES = {
+    "Kbuild": "obj-y += kernel/ mm/ fs/\nobj-$(CONFIG_NET) += net/\nobj-y += drivers/\n",
+    "kernel/Makefile": "obj-y = fork.o exit.o \\\n\tptrace.o\n",
+    "drivers/Makefile": "obj-$(CONFIG_GPIOLIB)\t+= gpio/\nobj-y += gpu/\n",
+    "drivers/gpio/Makefile": "obj-$(CONFIG_GPIOLIB) += gpiolib.o\nobj-$(CONFIG_GPIO_MXC)\t+= gpio-mxc.o\n",
+    "drivers/gpu/Makefile": "obj-y += drm/\n",
+    "drivers/gpu/drm/Makefile": "obj-$(CONFIG_DRM_XE) += xe/\nobj-y += amd/amdgpu/\n",
+    "drivers/gpu/drm/xe/Makefile": "xe-y += xe_bb.o \\\n\txe_bo.o\nxe-$(CONFIG_DRM_XE_DISPLAY) += "
+                                   "display/xe_fb_pin.o\nobj-$(CONFIG_DRM_XE) += xe.o\n",
+    "drivers/gpu/drm/amd/amdgpu/Makefile": "amdgpu-y := amdgpu_drv.o\nobj-$(CONFIG_DRM_AMDGPU) += amdgpu.o\n",
+    "fs/Makefile": "obj-$(CONFIG_SMBFS) += smb/\nobj-$(CONFIG_XFS_FS) += xfs/\n",
+    "fs/smb/Makefile": "obj-$(CONFIG_SMB_SERVER) += server/\n",
+    "fs/smb/server/Makefile": "ksmbd-y := smb2pdu.o vfs_cache.o\nobj-$(CONFIG_SMB_SERVER) += ksmbd.o\n",
+    "fs/xfs/Makefile": "obj-$(CONFIG_XFS_FS) += xfs.o\nxfs-y += $(addprefix libxfs/, \\\n\txfs_attr_leaf.o)\n",
+}
+
+
 def fake_hole(url, kopf=None):
+    if "raw.githubusercontent.com" in url:
+        pfad = url.split("/v6.12/", 1)[-1]
+        return (200, MAKEFILES[pfad]) if pfad in MAKEFILES else (404, "")
     cve = url.rsplit("=", 1)[-1].rsplit("/", 1)[-1]
-    datei = os.path.join(ONLINE, ("nvd-" + cve + ".json") if "nvd" in url else ("deb-" + cve + ".html"))
+    name = "nvd-%s.json" if "nvd.nist.gov" in url else "cveorg-%s.json" if "cveawg" in url else "deb-%s.html"
+    datei = os.path.join(ONLINE, name % cve)
     return (200, open(datei, encoding="utf-8").read()) if os.path.exists(datei) else (404, "")
 
 
@@ -239,6 +263,188 @@ for aus, soll in (("dev.tty.legacy_tiocsti = 1", "legacy_tiocsti=0"),
     a = p.antworte({"messages": [{"role": "user", "content": j}, {"role": "assistant", "content": "x"},
                                  {"role": "user", "content": aus}]})
     pruefe("TIOCSTI Folge allein: " + aus[:30], a.startswith("## 🟡") and soll in a and "Lokal ausnutzbar: **Ja**" in a, a[:80])
+
+# ---- Versionen: Formen, die früher falsch gelesen wurden
+for desc, inst, want in [
+    ("An issue was discovered in 6.0 before 6.0.3, 5.2 before 5.2.12, and 4.2 before 4.2.29.", "4.2.28", "ja"),
+    ("An issue was discovered in 6.0 before 6.0.3, 5.2 before 5.2.12, and 4.2 before 4.2.29.", "4.2.29", "nein"),
+    ("From 1.0.0 until 1.10.6 and 2.14.3, the encoder", "2.12.2", "ja"),
+    ("From 10.6.1 until 10.6.28, 10.11.19, 11.4.13, and 13.0.2, the engine", "10.11.18", "ja"),
+    ("From 10.6.1 until 10.6.28, 10.11.19, 11.4.13, and 13.0.2, the engine", "10.11.19", "nein"),
+    ("From 10.6.1 until 10.6.28, 10.11.19, 11.4.13, and 13.0.2, the engine", "10.5.2", "nein"),
+    ("versions 4.0.2 and later (fixed in 4.0.14, 5.0.10, 5.21.8 and 6.10)", "5.0.2", "ja"),
+    ("from 4.0.2 before 4.0.14, 5.0.10, 5.21.8, and 6.10 on all platforms", "5.0.2", "ja"),
+    ("HTTP::Body versions before 1.23_01 for Perl", "1.23", "ja"),
+    ("In versions 1.36.37 and below and 1.37.61 through 1.38.0, there is", "1.36.35", "ja"),
+    ("From versions 3.0.0 to before 3.2.9, 3.3.0 to before 3.3.11, and 3.4.0 to before 3.4.11, x", "3.3.12", "nein"),
+    ("ranges of the form 1.2.3.4-1.2.3.25 are compared wrongly", "4.6.1", "keine"),
+    ("This issue affects X: from ? before 7.8.0p0-1.1.", "7.6.0p1", "ja"),
+]:
+    got = w.pruefe_version(inst, w.bereiche_aus_beschreibung(desc))[0]
+    pruefe(f"version {desc[:40]!r} / {inst}", got == want, got)
+e = {"agent": {"name": "h"}, "package": {"name": "docker.io", "version": "20.10.24+dfsg1-1"},
+     "vulnerability": {"id": "CVE-X", "description": "BuildKit is a toolkit. Prior to version 0.28.1, a frontend can"}}
+pruefe("Version außerhalb, Paket nicht genannt: kein Grün", w.bewerte(e)["ampel"] == "gelb")
+e["package"]["version"] = "2.3.0-3+deb13u2"
+pruefe("Debian-Version aus +deb13", w.bewerte(e)["release"] == "trixie")
+e["vulnerability"]["scanner"] = {"condition": "Package less than 2.3.0-3+deb13u5"}
+pruefe("Fix-Version aus der Wazuh-Bedingung", "2.3.0-3+deb13u5" in " ".join(w.bewerte(e)["gruende"]))
+
+# ---- Kernel: Bau-Regeln aus Makefiles, Versionsstand von kernel.org
+def lies(verzeichnis):
+    texte = [MAKEFILES.get((verzeichnis + "/" if verzeichnis else "") + n) for n in ("Makefile", "Kbuild")]
+    return "\n".join(t for t in texte if t) or None
+
+
+for datei, soll in [
+    ("drivers/gpu/drm/xe/xe_bo.c", (["CONFIG_DRM_XE"], "xe")),
+    ("drivers/gpu/drm/xe/display/xe_fb_pin.c", (["CONFIG_DRM_XE_DISPLAY", "CONFIG_DRM_XE"], "xe")),
+    ("drivers/gpio/gpio-mxc.c", (["CONFIG_GPIO_MXC", "CONFIG_GPIOLIB"], "gpio-mxc")),
+    ("fs/smb/server/smb2pdu.c", (["CONFIG_SMB_SERVER", "CONFIG_SMBFS"], "ksmbd")),
+    ("fs/xfs/libxfs/xfs_attr_leaf.c", (["CONFIG_XFS_FS"], "xfs")),
+    ("drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c", (["CONFIG_DRM_AMDGPU"], "amdgpu")),
+    ("kernel/ptrace.c", ([], "ptrace")),
+    ("drivers/gpio/gibt-es-nicht.c", None), ("fs/smb/server/vfs_cache.h", None),
+]:
+    b = w.kbuild_loese(datei, lies)
+    pruefe(f"kbuild {datei}", (b and (b["symbole"], b["modul"])) == soll, b)
+
+V = [{"version": "6.8", "status": "affected"}, {"version": "0", "lessThan": "6.8", "status": "unaffected"},
+     {"version": "6.12.96", "lessThanOrEqual": "6.12.*", "status": "unaffected"},
+     {"version": "6.18.57", "lessThanOrEqual": "6.18.*", "status": "unaffected"},
+     {"version": "7.3", "lessThanOrEqual": "*", "status": "unaffected"}, {"version": "44e694958b95", "status": "affected"}]
+pruefe("Kernel-Stand: Fehler kam später", w.kernel_stand("6.1.170", V) == ("nie", "6.8"))
+pruefe("Kernel-Stand: Fix im Zweig drin", w.kernel_stand("6.12.115", V) == ("behoben", "6.12.96"))
+pruefe("Kernel-Stand: Fix im Zweig fehlt", w.kernel_stand("6.12.90", V) == ("offen", "6.12.96"))
+pruefe("Kernel-Stand: Zweig ohne Fix", w.kernel_stand("6.10.3", V) == ("offen", None))
+pruefe("Kernel-Stand: nur Backport-Zweige", w.kernel_stand("6.12.115", [
+    {"version": "6.18.53", "lessThan": "6.18.56", "status": "affected"}]) == ("nie", None))
+pruefe("Kernel-Stand: keine Angaben", w.kernel_stand("6.12.115", [{"version": "1da177e4c3f4", "status": "affected"}]) is None)
+pruefe("Kernbereich laut Beschreibung", w.kernbereich(["mm", "huge_memory"]) and w.kernbereich(["ptrace"])
+       and not w.kernbereich(["net", "mlx5"]) and not w.kernbereich(["drm", "xe"]))
+
+kr = {"paket": "linux-image-amd64", "version": "6.12.115-2", "typ": "kernel", "cve": "X", "host": "h", "schwere": "–"}
+kopf = "6.12.116+deb13-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.116-1 (2026-11-07)\n"
+t = kopf + "KERNEL-CHECK fs/btrfs/inode.c CONFIG_BTRFS_FS btrfs\nCONFIG_BTRFS_FS=m\nbtrfs  2023424  1\n"
+pruefe("Kernel exakt: Modul geladen", w.werte_kernel_exakt(kr, t)["betroffen"] == "Ja")
+t = kopf + "KERNEL-CHECK security/apparmor/policy.c CONFIG_SECURITY_APPARMOR apparmor\nCONFIG_SECURITY_APPARMOR=y\n"
+pruefe("Kernel exakt: fest eingebaut", w.werte_kernel_exakt(kr, t)["betroffen"] == "Ja")
+t = kopf + ("KERNEL-CHECK net/bluetooth/l2cap_core.c CONFIG_BT bluetooth\nCONFIG_BT=m\nModul nicht geladen\n"
+            "AUTOLOAD net-pf-31 bluetooth\n")
+e = w.werte_kernel_exakt(kr, t)
+pruefe("Kernel exakt: Netzwerk-Modul lädt sich selbst", e["ampel"] == "gelb" and "automatisch" in e["kopf"], e["kopf"])
+pruefe("Kernel exakt: ohne AUTOLOAD-Zeile grün", w.werte_kernel_exakt(kr, t.replace("AUTOLOAD", "x"))["ampel"] == "gruen")
+t = kopf + "KERNEL-CHECK a/b.c CONFIG_A,CONFIG_B b\n# CONFIG_A is not set\nCONFIG_B=y\nModul nicht geladen\n"
+pruefe("Kernel exakt: ein Symbol aus -> nicht eingebaut", w.werte_kernel_exakt(kr, t)["ampel"] == "gruen")
+pruefe("Kernel exakt: fremde Ausgabe", w.werte_kernel_exakt(kr, "wie geht das?") is None)
+t = kopf + "KERNEL-CHECK fs/btrfs/inode.c CONFIG_BTRFS_FS btrfs\nCONFIG_BTRFS_FS=m\nbtrfs  2023424  1\n"
+mit_fix = dict(kr, debian={"fix": "6.12.116-1"}, nvd={})
+e = w.kernel_nachbessern(mit_fix, w.werte_kernel_exakt(mit_fix, t), t)
+pruefe("Kernel: laufender Kernel hat den Fix", e["ampel"] == "gruen" and "autoremove" in e["tun"], e["tun"])
+netz = dict(kr, nvd={"weg": "NETWORK", "rechte": "NONE", "interaktion": "NONE", "quelle": "NVD"})
+e = w.kernel_nachbessern(netz, w.werte_kernel_exakt(netz, t), t)
+pruefe("Kernel: aktiv + Angriffsweg Netz -> rot", e["ampel"] == "rot" and e["angreifbar"] == "Ja")
+
+# ---- CVE.org
+org = w.lies_cveorg(w.json.load(open(os.path.join(ONLINE, "cveorg-CVE-2026-98999.json"), encoding="utf-8")))
+pruefe("CVE.org Kernel: Quelldatei", org["dateien"] == ["drivers/gpu/drm/xe/xe_bo.c"], org["dateien"])
+pruefe("CVE.org Kernel: Angriffsweg", org["vektor"].get("weg") == "LOCAL" and org["vektor"]["quelle"] == "CVE.org")
+pruefe("CVE.org Kernel: Stand 6.12 offen", w.kernel_stand("6.12.115", org["versionen"]) == ("offen", None))
+pruefe("CVE.org Kernel: 6.1 nie betroffen", w.kernel_stand("6.1.170", org["versionen"]) == ("nie", "6.8"))
+pruefe("CVE.org leer", w.lies_cveorg({"error": "CVE_RECORD_DNE"}) == {})
+pruefe("CVSS-Text", w.vektor_aus_text("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:H/I:H/A:N")
+       == {"weg": "NETWORK", "rechte": "NONE", "interaktion": "REQUIRED", "quelle": "CVE.org"})
+
+# ---- Kernel online: Quelldateien -> Bau-Regeln -> genaue Befehle; Ausgaben echter Rechner (*.v2.txt)
+po = w.Pipe()
+po.valves.WORUM_SATZ = False
+po.hole = fake_hole
+
+
+def folge2(name):
+    return open(os.path.join(DATEN_FOLGE, name + ".v2.txt"), encoding="utf-8").read()
+
+
+j = json_von("CVE-2026-98999-xe")
+a = po.antworte({"messages": [{"role": "user", "content": j}]})
+pruefe("online xe: genaues Symbol", "echo 'KERNEL-CHECK drivers/gpu/drm/xe/xe_bo.c CONFIG_DRM_XE xe'" in a
+       and "CONFIG_(DRM_XE)[= ]" in a and "| Betroffene Quelldateien | drivers/gpu/drm/xe/xe_bo.c |" in a, a[:300])
+a = po.antworte({"messages": [{"role": "user", "content": j}, {"role": "assistant", "content": "x"},
+                          {"role": "user", "content": folge2("CVE-2026-98999-xe")}]})
+pruefe("online xe Folge: Modul nicht geladen", a.startswith("## 🟢") and "`xe`" in a, a[:200])
+j = json_von("CVE-2026-99189-gpio")
+a = po.antworte({"messages": [{"role": "user", "content": j}]})
+pruefe("online gpio: genaues Symbol", "CONFIG_GPIO_MXC,CONFIG_GPIOLIB gpio-mxc" in a, a[:300])
+a = po.antworte({"messages": [{"role": "user", "content": j}, {"role": "assistant", "content": "x"},
+                          {"role": "user", "content": folge2("CVE-2026-99189-gpio")}]})
+pruefe("online gpio Folge: nicht eingebaut", a.startswith("## 🟢") and "`CONFIG_GPIO_MXC` ist nicht gesetzt" in a, a[:200])
+a = po.antworte({"messages": [{"role": "user", "content": json_von("CVE-2026-99125-pai")}]})
+pruefe("online pai: fremde Architektur aus dem Dateipfad", a.startswith("## 🟢") and "arch/s390/" in a
+       and "```bash" not in a, a[:200])
+a = po.antworte({"messages": [{"role": "user", "content": json_von("CVE-2026-89611-kernel")}]})
+pruefe("online ntfs: nicht auflösbar -> Name aus der Beschreibung", "grep -iE '_NTFS(_|=| )'" in a
+       and "nicht eindeutig ablesbar" in a, a[:200])
+# GitHub weist ab (429): dieselben Makefiles kommen von der Ausweichquelle
+pg = w.Pipe()
+pg.valves.WORUM_SATZ = False
+pg.hole = lambda url, kopf=None: (429, "") if "raw.githubusercontent.com" in url else fake_hole(
+    url.replace("cdn.jsdelivr.net/gh/torvalds/linux@v6.12/", "raw.githubusercontent.com/torvalds/linux/v6.12/"))
+a = pg.antworte({"messages": [{"role": "user", "content": json_von("CVE-2026-98999-xe")}]})
+pruefe("GitHub 429: Ausweichquelle", "KERNEL-CHECK drivers/gpu/drm/xe/xe_bo.c CONFIG_DRM_XE xe" in a, a[:200])
+pg = w.Pipe()
+pg.valves.WORUM_SATZ = False
+pg.hole = lambda url, kopf=None: (429, "") if "/v6.12/" in url or "@v6.12/" in url or "h=v6.12" in url else fake_hole(url)
+a = pg.antworte({"messages": [{"role": "user", "content": json_von("CVE-2026-98999-xe")}]})
+pruefe("alle Makefile-Quellen 429: Name aus der Beschreibung", "grep -iE '_XE(_|=| )'" in a and "nicht abrufbar" in a, a[:200])
+# Kerncode (ohne CONFIG-Symbol): gleich fertig, ohne Befehle; mit Fix bei Debian -> Update verfügbar
+r = w.bewerte(w.lade_eintrag(json_von("CVE-2026-98999-xe")))
+r.update(nvd={}, dateien=["kernel/ptrace.c"], kstand=None, bau=[w.kbuild_loese("kernel/ptrace.c", lies)],
+         debian={"release": "trixie", "status": "vulnerable", "fix": "6.12.117-1", "unwichtig": False})
+a = w.antwort_a(w.wende_online_an(r), "")
+pruefe("Kerncode: Update verfügbar, keine Befehle", a.startswith("## 🟡 Kernel-Update verfügbar")
+       and "```bash" not in a and "6.12.117-1" in a and "Betroffen: **Ja**" in a, a[:200])
+r = w.bewerte(w.lade_eintrag(json_von("CVE-2026-98999-xe")))
+r.update(nvd={}, dateien=["drivers/gpu/drm/xe/xe_bo.c"], kstand=("nie", "6.14"), bau=None, debian={})
+a = w.antwort_a(w.wende_online_an(r), "")
+pruefe("Kernel: Fehler kam erst später -> grün", a.startswith("## 🟢") and "6.14" in a, a[:200])
+# ohne Internet: Kernbereich aus der Beschreibung wird nicht mehr über geratene Config-Namen geprüft
+e = w.lade_eintrag(json_von("CVE-2026-98999-xe"))
+e["vulnerability"]["description"] = "In the Linux kernel, the following vulnerability has been resolved:  mm: huge_memory: fix x"
+a = p.antworte({"messages": [{"role": "user", "content": w.json.dumps(e)}]})
+pruefe("offline mm/huge_memory: Kerncode, keine Befehle", a.startswith("## 🟡 Betroffen") and "```bash" not in a, a[:120])
+
+# ---- Netz-Check: Dienste mit offenem Port, die das Paket nutzen (statt fester Port-Liste)
+NETZ = ("0\nNETZ-CHECK {q}: {n} Dateien\n{zeilen}\nNETZ-ENDE 5 Sockets, {ohne} ohne Prozess\n")
+r = {"paket": "rsync", "cve": "CVE-1", "beschreibung": "rsync daemon flaw", "typ": "paket"}
+e = w.werte_paket_aus(r, NETZ.format(q="rsync", n=3, ohne=0, zeilen="LAUSCHT-IST-PAKET rsync tcp/0.0.0.0:873 tcp/[::]:873"))
+pruefe("Netz: eigener Dienst außen -> rot", e["ampel"] == "rot" and "tcp/0.0.0.0:873" in " ".join(e["gruende"]))
+e = w.werte_paket_aus(r, NETZ.format(q="rsync", n=3, ohne=0, zeilen="LAUSCHT-IST-PAKET rsync tcp/127.0.0.1:873\nLAUSCHT sshd tcp/0.0.0.0:22"))
+pruefe("Netz: eigener Dienst nur lokal", e["ampel"] == "gelb" and e["angreifbar"] == "Nein", e["gruende"])
+e = w.werte_paket_aus(r, NETZ.format(q="rsync", n=3, ohne=0, zeilen="LAUSCHT sshd tcp/0.0.0.0:22"))
+pruefe("Netz: kein Dienst nutzt das Paket", e["angreifbar"] == "Nein" and "Kein von außen" in " ".join(e["gruende"]))
+e = w.werte_paket_aus(r, NETZ.format(q="rsync", n=3, ohne=4, zeilen="LAUSCHT sshd tcp/0.0.0.0:22"))
+pruefe("Netz: nicht als root -> unklar + Hinweis", e["angreifbar"] == "Unklar" and "als root" in " ".join(e["gruende"]))
+lib = {"paket": "libfoo1", "cve": "CVE-1", "beschreibung": "overflow in parser", "typ": "paket"}
+e = w.werte_paket_aus(lib, NETZ.format(q="foo", n=2, ohne=0, zeilen="LAUSCHT-NUTZT-PAKET nginx tcp/0.0.0.0:443"))
+pruefe("Netz: Dienst hat Bibliothek geladen -> möglich", e["ampel"] == "gelb" and e["angreifbar"] == "Möglich")
+pruefe("Netz: Überschrift dazu", "erreichbarer Dienst nutzt das Paket" in w.antwort_b(dict(lib, version="1", host="h", schwere="–"), e))
+e = w.werte_paket_aus(lib, NETZ.format(q="foo", n=2, ohne=0, zeilen="LAUSCHT-NUTZT-PAKET firefox-esr udp/*:40672"))
+pruefe("Netz: UDP-Antwortport ist kein Dienst", e["angreifbar"] == "Nein")
+py = {"paket": "python3-oauthlib", "cve": "CVE-1", "beschreibung": "timing issue", "typ": "paket"}
+e = w.werte_paket_aus(py, NETZ.format(q="python-oauthlib", n=0, ohne=0, zeilen="LAUSCHT sshd tcp/0.0.0.0:22"))
+pruefe("Netz: Python-Paket, kein Python-Dienst", e["angreifbar"] == "Nein" and "Python-Code" in " ".join(e["gruende"]))
+e = w.werte_paket_aus(py, NETZ.format(q="python-oauthlib", n=0, ohne=0, zeilen="LAUSCHT gunicorn tcp/0.0.0.0:8000"))
+pruefe("Netz: Python-Paket, Python-Dienst außen", e["angreifbar"] == "Möglich")
+lokal = dict(r, beschreibung="A local attacker can ...")
+e = w.werte_paket_aus(lokal, NETZ.format(q="rsync", n=3, ohne=0, zeilen="LAUSCHT-IST-PAKET rsync tcp/0.0.0.0:873"))
+pruefe("Netz: lokale Lücke nie rot", e["ampel"] != "rot" and e["angreifbar"] == "Nein")
+j = json_von("CVE-2026-118370-libexpat")
+a = p.antworte({"messages": [{"role": "user", "content": j}]})
+pruefe("Paket-Befehle: Netz-Check dabei", "NETZ-CHECK" in a and "changelog.Debian.gz /usr/share/doc/libexpat1/changelog.gz" in a)
+a = p.antworte({"messages": [{"role": "user", "content": j}, {"role": "assistant", "content": "x"},
+                         {"role": "user", "content": folge2("CVE-2026-118370-libexpat")}]})
+pruefe("libexpat Folge mit Netz-Check (echte Ausgabe)", "avahi-daemon" in a and "firefox" not in a
+       and "Von außen angreifbar: **Möglich**" in a, a[:200])
 
 print("ALLES OK" if not fehler else f"{fehler} FEHLER")
 sys.exit(1 if fehler else 0)

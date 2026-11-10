@@ -48,22 +48,34 @@ immer gleiches Ergebnis, ~1 Sekunde, testbar. Das LLM schreibt nur noch den Satz
 | `LLM_KEY` | API-Key, falls nötig | leer |
 | `LLM_MODELL` | Modellname | leer |
 | `WORUM_SATZ` | Satz „Worum geht's“ vom LLM; aus = ganz ohne LLM | an |
-| `ONLINE` | NVD (Angriffsweg) und Debian-Tracker (Fix-Stand) abfragen; braucht Internet im Open-WebUI-Container | an |
+| `ONLINE` | NVD und CVE.org (Angriffsweg), Debian-Tracker (Fix-Stand) und bei Kernel-Meldungen die Bau-Regeln des Kernels (GitHub) abfragen; braucht Internet im Open-WebUI-Container | an |
 | `NVD_KEY` | Optionaler [NVD-API-Key](https://nvd.nist.gov/developers/request-an-api-key) für mehr Anfragen pro Minute | leer |
 
-## Internet: NVD und Debian-Tracker
+## Internet: Daten statt Stichwörter
 
-Mit Internet fragt die Funktion zu jeder CVE zwei öffentliche Quellen ab:
+Seit Version 2.0 entscheidet die Funktion nach öffentlichen Daten zur CVE, nicht nach Stichwörtern für einzelne Meldungen.
+Neue Meldungen brauchen deshalb in der Regel keine neue Code-Fassung mehr. Mit Internet fragt sie ab:
 
-- **NVD** (nvd.nist.gov): Angriffsweg – über das Netzwerk, nur lokal oder nur mit Zugriff am Gerät – und nötige Rechte
 - **Debian-Tracker** (security-tracker.debian.org): Stand für die Debian-Version des Rechners – behoben in Version X,
-  offen, ignoriert, unwichtig oder nicht betroffen
+  offen, ignoriert, unwichtig oder nicht betroffen. Gilt für Pakete und für den Kernel
+- **NVD** (nvd.nist.gov): Angriffsweg – über das Netzwerk, nur lokal oder nur mit Zugriff am Gerät – und nötige Rechte
+- **CVE.org** (cveawg.mitre.org): derselbe Angriffsweg vom Herausgeber der CVE, falls die NVD nichts hat oder nicht
+  antwortet; bekannte Ausnutzung laut CISA; bei Kernel-CVEs die **betroffenen Quelldateien** und ab welcher
+  Kernel-Version der Fehler vorhanden bzw. behoben ist
+- **Makefiles des Kernels** (GitHub, nur bei Kernel-Meldungen): Aus der Quelldatei wird das genaue Config-Symbol und der
+  Modulname, z. B. `drivers/gpu/drm/xe/xe_bo.c` → `CONFIG_DRM_XE` → Modul `xe`. Der Prüfbefehl fragt genau das ab
 
-Ist das eindeutig, steht das Endergebnis schon in der ersten Antwort, ohne Prüfbefehle (z. B. „Update verfügbar“ oder
-„nur lokal ausnutzbar“). Ohne Internet arbeitet die Funktion wie bisher mit festen Regeln und Prüfbefehlen; die Details
-nennen dann den Grund.
+Ist das eindeutig, steht das Endergebnis schon in der ersten Antwort, ohne Prüfbefehle (z. B. „Update verfügbar“, „nur
+lokal ausnutzbar“, „Fehler kam erst mit Kernel 6.8“). Ohne Internet arbeitet die Funktion mit den Regeln aus der
+Beschreibung und den Prüfbefehlen; die Details nennen dann den Grund. 🟢 gibt es ohne Internet nur mit Beleg.
 
-**Prüfen:** Im Chat mit dem Modell *Wazuh-Analyse* einfach `Verbindungstest` schreiben. Die Antwort zeigt für NVD,
+**Warum das beim Kernel wichtig ist:** Bis Version 1.25 wurde der Treibername aus der Beschreibung geraten („gpio: mxc:“ →
+`grep _MXC`). Eine Gegenprobe mit 899 Kernel-CVEs von 2026 auf einem Debian-13-Rechner zeigte: Bei 22 % der Lücken in
+wirklich aktivem Kernel-Code ergab das fälschlich 🟢 (z. B. `ptrace`, `workqueue`, `io_uring`, `mm/huge_memory`). Mit den
+Makefiles lassen sich 87 % der Meldungen genau zuordnen; der Rest wird wie bisher über den Namen geprüft, bekommt aber
+ohne Beleg kein 🟢 mehr.
+
+**Prüfen:** Im Chat mit dem Modell *Wazuh-Analyse* einfach `Verbindungstest` schreiben. Die Antwort zeigt für NVD, CVE.org, GitHub,
 Debian-Tracker und Sprachmodell einen Code:
 
 | Code | Bedeutung |
@@ -85,16 +97,25 @@ Antwort. Ein 3–4B-Modell oder reine CPU reicht auch.
 
 ## Was geprüft wird
 
-- **Version:** Bereiche aus der Beschreibung („before“, „through“, „from X until Y“ …), Epoche, `+really`, Debian-Backport (`deb` → nie 🔴)
-- **Kernel:** Treiber aus der Beschreibung, fremde Architektur → 🟢, Kernel-Config und `lsmod` (Modul nicht geladen → 🟢)
-- **Online (optional):** Angriffsweg und Rechte aus der NVD, Fix-Stand der eigenen Debian-Version aus dem Debian-Tracker
-  (Versionsvergleich wie `dpkg`)
-- **Nach den Ausgaben:** Debian-Changelog, offene Ports bekannter Dienste, lokale Lücken, Client-Lücken, Secure Boot, Bibliotheken → nutzende Programme, alte CVEs → Debian-Tracker
+- **Version:** Bereiche aus der Beschreibung („before“, „through“, „from X until Y“, „X before Y“, Fix-Listen je Zweig,
+  „X and below“ …), Epoche, `+really`, Debian-Backport (`deb` → nie 🔴). 🟢 allein aus der Versionsangabe nur, wenn die
+  Beschreibung das Paket auch nennt
+- **Kernel:** Quelldateien der CVE → Config-Symbol und Modul aus den Makefiles → `grep` auf genau dieses Symbol, `lsmod` auf
+  genau dieses Modul. Fremde Architektur, Fehler erst in neuerem Kernel, Fix schon installiert → sofort 🟢. Nicht
+  eingebaut oder Modul nicht geladen → 🟢; Netzwerk-Module, die der Kernel bei Bedarf selbst lädt → 🟡 mit Sperr-Befehl
+- **Online (optional):** Angriffsweg und Rechte (NVD, sonst CVE.org), Fix-Stand der eigenen Debian-Version aus dem
+  Debian-Tracker (Versionsvergleich wie `dpkg`), bekannte Ausnutzung (CISA)
+- **Nach den Ausgaben:** Debian-Changelog; **Netz-Check**: Welche Prozesse mit offenem Netzwerk-Port gehören zum Paket
+  oder haben es geladen (Vergleich der Paketdateien mit `/proc/PID/maps`, ohne feste Port-Liste) – eigener Dienst von
+  außen erreichbar → 🔴, Bibliothek in erreichbarem Dienst geladen → 🟡 „möglich“, sonst nicht über offene Ports
+  angreifbar; dazu lokale Lücken, Client-Lücken, Secure Boot, nutzende Programme
 
 ## Grenzen
 
-Nur Debian/Ubuntu und nur Schwachstellen-Einträge (keine Alerts). Die Beschreibung wird per Muster gelesen. Ob ein Paket den
-betroffenen Code wirklich enthält, prüft die Funktion nur über den Namen (im Zweifel 🟡). Ausgabe auf Deutsch.
+Nur Debian/Ubuntu und nur Schwachstellen-Einträge (keine Alerts). Ohne Internet wird nur die Beschreibung per Muster
+gelesen. Ob ein Paket den betroffenen Code wirklich enthält, prüft die Funktion nur über den Namen (im Zweifel 🟡). Rund
+jede achte Kernel-Meldung lässt sich aus den Makefiles nicht eindeutig zuordnen und wird über den Namen geprüft. Der
+Netz-Check sieht nur Prozesse, die gerade laufen, und braucht root. Ausgabe auf Deutsch.
 **Ein 🟢 ist eine begründete Einschätzung, keine Garantie.**
 
 ## Test

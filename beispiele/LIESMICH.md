@@ -3,7 +3,9 @@
 Echte Wazuh-Meldungen (anonymisiert: Rechnernamen ersetzt, Portlisten gekürzt) und die Ausgaben der Prüfbefehle.
 
 - `json/` – Einträge aus `wazuh-states-vulnerabilities-*`, so wie man sie in den Chat einfügt
-- `ausgaben/` – Ausgabe der Prüfbefehle zum gleichnamigen JSON
+- `ausgaben/` – Ausgabe der Prüfbefehle zum gleichnamigen JSON. Dateien `*.v2.txt` sind Ausgaben der Befehle ab
+  Version 2.0 (Kernel: genaues Config-Symbol; Pakete: Netz-Check), die übrigen stammen von den Befehlen bis 1.25 und
+  werden weiter verstanden
 
 | Datei | Fall | Erwartet (erste Antwort → Folgeantwort) |
 |---|---|---|
@@ -19,4 +21,13 @@ Echte Wazuh-Meldungen (anonymisiert: Rechnernamen ersetzt, Portlisten gekürzt) 
 | CVE-2026-99125-pai | Kernel, fremde Architektur (s390) | 🟢 → 🟢 |
 | CVE-2026-99189-gpio | Kernel, zwei Namen „gpio: mxc:“ | 🟡 |
 | CVE-2019-12067-qemu | alte CVE (Changelog sagt wenig) | 🟡 → 🟡 Debian-Tracker ansehen |
-| CVE-2026-118370-libexpat | „through“, Bibliothek mit vielen Nutzern | 🟡 → 🟡 Risiko hängt von Programmen ab |
+| CVE-2026-118370-libexpat | „through“, Bibliothek mit vielen Nutzern | 🟡 → 🟡 Risiko hängt von Programmen ab; mit Netz-Check (`.v2.txt`): 🟡 erreichbarer Dienst nutzt das Paket |
+| CVE-2016-2568-polkit, CVE-2016-2781-coreutils | alte lokale Lücke über TIOCSTI | 🟡 → 🟢 (Kernel sperrt TIOCSTI) |
+| CVE-2026-7307x-vim (4 Dateien) | Datei-Lücken, eine nur in der GUI-Fassung | 🟡 → 🟡 nicht angreifbar bzw. 🟢 |
+| CVE-2026-85231-libtirpc | Lücke nur im RPC-Dienst | 🟡 → 🟡 nicht angreifbar |
+| CVE-2026-69248-cryptography | Version außerhalb des Bereichs | 🟢 |
+| CVE-2026-78410-fdisk, CVE-2026-119591-sqlite | keine Grenze bzw. Backport möglich | 🟡 |
+| CVE-2026-49265-oauthlib | Lücke im Server-Teil, nur Client-Nutzung | 🔴 → 🟢 |
+
+Mit Internet (Version 2.0) fallen die Kernel-Beispiele genauer aus: `xe` und `gpio` bekommen Befehle mit dem genauen
+Config-Symbol (Ausgaben in `*.v2.txt` → beide 🟢), `pai` ist über den Dateipfad `arch/s390/…` sofort 🟢.
