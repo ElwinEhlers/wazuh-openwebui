@@ -28,6 +28,7 @@ Echte Wazuh-Meldungen (anonymisiert: Rechnernamen ersetzt, Portlisten gekürzt) 
 | CVE-2026-69248-cryptography | Version außerhalb des Bereichs | 🟢 |
 | CVE-2026-78410-fdisk, CVE-2026-119591-sqlite | keine Grenze bzw. Backport möglich | 🟡 |
 | CVE-2026-49265-oauthlib | Lücke im Server-Teil, nur Client-Nutzung | 🔴 → 🟢 |
+| CVE-2026-97687-urllib3 | Python-Paket, Netz-Check: kein Python-Dienst lauscht (`.v2.txt`) | 🟡 → 🟡 nicht angreifbar |
 
-Mit Internet (Version 2.0) fallen die Kernel-Beispiele genauer aus: `xe` und `gpio` bekommen Befehle mit dem genauen
+Mit Internet fallen die Kernel-Beispiele genauer aus: `xe` und `gpio` bekommen Befehle mit dem genauen
 Config-Symbol (Ausgaben in `*.v2.txt` → beide 🟢), `pai` ist über den Dateipfad `arch/s390/…` sofort 🟢.
