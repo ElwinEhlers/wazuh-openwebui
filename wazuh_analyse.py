@@ -4,7 +4,7 @@ author: Elwin Ehlers
 author_url: https://github.com/ElwinEhlers
 credits: Entwickelt mit Claude (Anthropic)
 description: Bewertet Wazuh-Schwachstellen-Einträge (wazuh-states-vulnerabilities) auf Debian/Ubuntu mit festen Regeln und öffentlichen Daten (Debian-Tracker, NVD, CVE.org, Bau-Regeln des Kernels) und wertet die Ausgaben der Prüfbefehle aus. Das Sprachmodell schreibt nur den Satz "Worum geht's" (optional).
-version: 2.1
+version: 2.3
 license: MIT
 """
 
@@ -549,6 +549,10 @@ def netz_lage(netz, paket):
         return "frei", [], (f"Das Paket ist {sprache}-Code, und kein von außen erreichbarer Dienst läuft mit {sprache} "
                             f"(geprüft: {zahl} Prozesse mit offenem Netzwerk-Port). Über offene Ports ist die Lücke "
                             "damit nicht erreichbar.")
+    if netz["ohne_prozess"]:  # ohne root sieht der Befehl fremde Prozesse nicht: keine Aussage möglich
+        return "root", [], (f"Der Netz-Check lief ohne root-Rechte: Bei {netz['ohne_prozess']} offenen Ports war der "
+                            "Prozess nicht sichtbar. Ob ein von außen erreichbarer Dienst das Paket nutzt, ist damit "
+                            "noch offen.")
     return "unklar", [], ("Ob ein Dienst mit offenem Netzwerk-Port das Paket nutzt, ließ sich nicht feststellen "
                           "(das Paket enthält keine Programme oder Bibliotheken, die sich in laufenden Prozessen "
                           "wiederfinden lassen)." + hinweis)
@@ -985,6 +989,11 @@ def werte_paket_aus(r, text):
                            "aus fremder Quelle verarbeitet (Dateien, Antworten aus dem Internet).")
         elif lage == "nutzt":
             erg["angreifbar"] = "Möglich"
+        elif lage == "root":
+            erg["kopf"] = "🟡 Betroffen – Netz-Check bitte als root wiederholen"
+            erg["befehle"] = paket_befehle(r["paket"], r["cve"])
+            erg["befehle_text"] = ("Bitte als root wiederholen (vorher `sudo -i` oder `su -`) und die Ausgabe hier "
+                                   "einfügen:")
     bibliotheken = [n for n in nutzer if re.search(r"^lib|-libs?$|^zlib|lib\d", n)]
     if nutzer and len(bibliotheken) == len(nutzer):
         satz = f"`{r['paket']}` wird nur von Bibliotheken genutzt (" + ", ".join(f"`{n}`" for n in nutzer[:6]) + ")."
@@ -1170,6 +1179,8 @@ def lokal_wert(r, e):
         return "Nur mit Zugriff am Gerät"
     if nvd.get("rechte") == "HIGH":
         return "Nur mit Root-Rechten"
+    if nvd.get("weg") in ("NETWORK", "ADJACENT_NETWORK", "ADJACENT") and e["angreifbar"] != "Ja":
+        return "Nur über ein Programm, das das Paket nutzt"  # Netz-Lücke ohne erreichbaren Dienst: kein lokaler Weg
     if nvd.get("weg"):
         return "Ja, falls betroffen" if e["betroffen"] == "Unklar" else "Ja"
     b = r.get("beschreibung", "")

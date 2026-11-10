@@ -423,7 +423,12 @@ pruefe("Netz: eigener Dienst nur lokal", e["ampel"] == "gelb" and e["angreifbar"
 e = w.werte_paket_aus(r, NETZ.format(q="rsync", n=3, ohne=0, zeilen="LAUSCHT sshd tcp/0.0.0.0:22"))
 pruefe("Netz: kein Dienst nutzt das Paket", e["angreifbar"] == "Nein" and "Kein von außen" in " ".join(e["gruende"]))
 e = w.werte_paket_aus(r, NETZ.format(q="rsync", n=3, ohne=4, zeilen="LAUSCHT sshd tcp/0.0.0.0:22"))
-pruefe("Netz: nicht als root -> unklar + Hinweis", e["angreifbar"] == "Unklar" and "als root" in " ".join(e["gruende"]))
+pruefe("Netz: nicht als root -> unklar + Hinweis", e["angreifbar"] == "Unklar" and "ohne root" in " ".join(e["gruende"]))
+e = w.werte_paket_aus({"paket": "gstreamer1.0-plugins-good", "cve": "CVE-1", "beschreibung": "RTP overflow", "typ": "paket"},
+                      NETZ.format(q="gst-plugins-good1.0", n=0, ohne=11, zeilen="LAUSCHT firefox-esr udp/*:40672"))
+a = w.antwort_b({"paket": "gstreamer1.0-plugins-good", "version": "1", "host": "h", "schwere": "–", "cve": "CVE-1", "typ": "paket"}, e)
+pruefe("Netz: ohne root -> Befehle noch einmal, kein falscher Grund", a.startswith("## 🟡 Betroffen – Netz-Check bitte als root")
+       and "NETZ-CHECK" in a and "keine Programme oder Bibliotheken" not in a and "rdepends --installed --no-breaks --no-conflicts --no-replaces --no-enhances --no-suggests lib" not in a, a[:300])
 lib = {"paket": "libfoo1", "cve": "CVE-1", "beschreibung": "overflow in parser", "typ": "paket"}
 e = w.werte_paket_aus(lib, NETZ.format(q="foo", n=2, ohne=0, zeilen="LAUSCHT-NUTZT-PAKET nginx tcp/0.0.0.0:443"))
 pruefe("Netz: Dienst hat Bibliothek geladen -> möglich", e["ampel"] == "gelb" and e["angreifbar"] == "Möglich")
@@ -445,6 +450,21 @@ a = p.antworte({"messages": [{"role": "user", "content": j}, {"role": "assistant
                          {"role": "user", "content": folge2("CVE-2026-118370-libexpat")}]})
 pruefe("libexpat Folge mit Netz-Check (echte Ausgabe)", "avahi-daemon" in a and "firefox" not in a
        and "Von außen angreifbar: **Möglich**" in a, a[:200])
+
+# ---- echter Lauf auf einem Debian-13-Server: Python-Paket, nur docker-proxy/sshd lauschen (kein Python-Dienst)
+j = json_von("CVE-2026-97687-urllib3")
+aus = folge2("CVE-2026-97687-urllib3")
+a = p.antworte({"messages": [{"role": "user", "content": j}, {"role": "assistant", "content": "x"},
+                         {"role": "user", "content": aus}]})
+pruefe("urllib3 Folge: kein Python-Dienst", a.startswith("## 🟡 Betroffen, aber derzeit nicht angreifbar")
+       and "kein von außen erreichbarer Dienst läuft mit Python (geprüft: 14 Prozesse" in a, a[:200])
+r = w.bewerte(w.lade_eintrag(j))
+r["nvd"] = {"weg": "NETWORK", "rechte": "NONE", "interaktion": "REQUIRED", "quelle": "NVD"}
+e = w.nvd_nachbessern(r, w.werte_paket_aus(r, aus))
+pruefe("Netz-Lücke ohne erreichbaren Dienst: nicht „lokal: Ja“",
+       w.lokal_wert(r, e) == "Nur über ein Programm, das das Paket nutzt", w.lokal_wert(r, e))
+e = {"betroffen": "Ja", "angreifbar": "Ja"}
+pruefe("Netz-Lücke mit erreichbarem Dienst: lokal Ja", w.lokal_wert(r, e) == "Ja")
 
 print("ALLES OK" if not fehler else f"{fehler} FEHLER")
 sys.exit(1 if fehler else 0)
